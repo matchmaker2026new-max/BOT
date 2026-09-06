@@ -427,7 +427,7 @@ client.on(Events.MessageCreate, async message => {
       await message.delete().catch(error => console.error('Greeting message delete error:', error));
       const staffId = claimedStaffOf(message.channel) || message.author.id;
       await message.channel.send(
-        `:B5: تفضل معاك الإداري <@${staffId}> <:emoji_191:915647976058277918>\nكيف أقدر أساعدك اليوم؟`
+        `<a:emoji:1480734872220729434> تفضل معاك الإداري <@${staffId}> <a:emoji:1453064107719655649>\nكيف أقدر أساعدك اليوم؟ <a:emoji:1498124324945793225>`
       );
       return;
     }
