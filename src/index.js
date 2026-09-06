@@ -142,13 +142,21 @@ async function createTicket(interaction, type, subject, description, link, ids) 
   await interaction.deferReply({ ephemeral: true });
   const existing = guild.channels.cache.find(c => c.topic?.includes(`ticket-owner:${interaction.user.id}`));
   if (existing) return interaction.editReply({ content: `لديك تذكرة مفتوحة بالفعل: ${existing}` });
+  const botMember = guild.members.me || await guild.members.fetch(interaction.client.user.id);
+  const category = config.ticketCategoryId ? guild.channels.cache.get(config.ticketCategoryId) : null;
+  if (config.ticketCategoryId && (!category || category.type !== ChannelType.GuildCategory)) {
+    return interaction.editReply({ content: `فئة التذاكر غير موجودة أو ليست فئة قنوات: ${config.ticketCategoryId}` });
+  }
+  const availableStaffRoleIds = config.ticketStaffRoleIds.filter(roleId => guild.roles.cache.has(roleId));
+  const missingStaffRoleIds = config.ticketStaffRoleIds.filter(roleId => !guild.roles.cache.has(roleId));
+  if (missingStaffRoleIds.length) console.warn(`رتب غير موجودة في هذا السيرفر: ${missingStaffRoleIds.join(', ')}`);
   const item = ticketOptions[type] || ticketOptions.other;
   const overwrites = [
     { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
     { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-    { id: guild.members.me.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] }
+    { id: botMember.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] }
   ];
-  for (const roleId of config.ticketStaffRoleIds) overwrites.push({
+  for (const roleId of availableStaffRoleIds) overwrites.push({
     id: roleId,
     allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
     deny: [PermissionsBitField.Flags.SendMessages]
@@ -156,7 +164,7 @@ async function createTicket(interaction, type, subject, description, link, ids) 
   const channel = await guild.channels.create({
     name: `${config.ticketPrefix}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9\-_]/g, '').slice(0, 80) || `${config.ticketPrefix}-${interaction.user.id.slice(-4)}`,
     type: ChannelType.GuildText,
-    parent: config.ticketCategoryId || undefined,
+    parent: category?.id,
     topic: `ticket-owner:${interaction.user.id} | type:${type}`,
     permissionOverwrites: overwrites,
     reason: `تذكرة جديدة بواسطة ${interaction.user.tag}`
@@ -168,7 +176,7 @@ async function createTicket(interaction, type, subject, description, link, ids) 
   embed.setImage(bannerUrl);
   const controls = ticketControls();
   await interaction.editReply({ content: `تم إنشاء التذكرة داخل الفئة المطلوبة: ${channel}` });
-  const staffMentions = config.ticketStaffRoleIds.map(roleId => `<@&${roleId}>`).join(' ');
+  const staffMentions = availableStaffRoleIds.map(roleId => `<@&${roleId}>`).join(' ');
   await channel.send({ content: `<@${interaction.user.id}> ${staffMentions}`, embeds: [embed], components: [controls] }).catch(error => console.error('Ticket message error:', error));
 }
 
