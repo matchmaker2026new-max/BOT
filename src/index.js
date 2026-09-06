@@ -23,6 +23,7 @@ const isStaff = member => Boolean(member && (
 ));
 const ticketOf = channel => channel.topic?.match(/ticket-owner:(\d+)/)?.[1] || null;
 const claimedStaffOf = channel => channel.topic?.match(/ticket-claimed-by:(\d+)/)?.[1] || null;
+const serverEmoji = (guild, name) => guild.emojis.cache.find(emoji => emoji.name === name)?.toString() || '';
 const pointsFile = path.join(__dirname, '..', 'data', 'admin-points.json');
 const localPanelImage = path.join(__dirname, '..', 'assets', 'panel.png');
 const hasLocalPanelImage = () => fs.existsSync(localPanelImage);
@@ -425,8 +426,11 @@ client.on(Events.MessageCreate, async message => {
       if (!ticketOf(message.channel) || !isStaff(message.member)) return;
       await message.delete().catch(error => console.error('Greeting message delete error:', error));
       const staffId = claimedStaffOf(message.channel) || message.author.id;
+      const firstEmoji = serverEmoji(message.guild, '2434darkbluecrown');
+      const secondEmoji = serverEmoji(message.guild, '16577crownbrown');
+      const thirdEmoji = serverEmoji(message.guild, 'Dancing');
       await message.channel.send(
-        `<:emoji:1480734872220729434> تفضل معاك الإداري <@${staffId}> <:emoji:1453064107719655649>\nكيف أقدر أساعدك اليوم؟ <:emoji:1498124324945793225>`
+        `${firstEmoji} تفضل معاك الإداري <@${staffId}> ${secondEmoji}\nكيف أقدر أساعدك اليوم؟ ${thirdEmoji}`
       );
       return;
     }
