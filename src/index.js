@@ -366,6 +366,14 @@ client.on(Events.MessageCreate, async message => {
   try {
     if (message.author.bot || !message.guild) return;
     const command = message.content.trim().replace(/[إأآ]/g, 'ا');
+    if (command === 'تفضل') {
+      if (!ticketOf(message.channel) || !isStaff(message.member)) return;
+      await message.delete().catch(error => console.error('Greeting message delete error:', error));
+      await message.channel.send(
+        `:B5: تفضل معاك الإداري ${message.author} <:emoji_191:915647976058277918>\nكيف أقدر أساعدك اليوم؟`
+      );
+      return;
+    }
     if (command === 'نموذج') {
       if (!ticketOf(message.channel)) return message.reply('هذا الأمر يعمل داخل قناة تذكرة فقط.');
       if (!isStaff(message.member)) return message.reply('هذا الأمر للإداريين فقط.');
