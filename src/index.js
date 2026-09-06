@@ -23,10 +23,41 @@ const isStaff = member => Boolean(member && (
 ));
 const ticketOf = channel => channel.topic?.match(/ticket-owner:(\d+)/)?.[1] || null;
 const claimedStaffOf = channel => channel.topic?.match(/ticket-claimed-by:(\d+)/)?.[1] || null;
+const pointsFile = path.join(__dirname, '..', 'data', 'admin-points.json');
 const localPanelImage = path.join(__dirname, '..', 'assets', 'panel.png');
 const hasLocalPanelImage = () => fs.existsSync(localPanelImage);
 const bannerUrl = 'https://media.discordapp.net/attachments/1545552204998512751/1546065695928881172/Untitled41_20260507131326-1-1-1.png?ex=6a9e6d62&is=6a9d1be2&hm=dcedf72322d11ff1f4652bc9cf51778339642039aa81ef12ac484c52d8bf9b26&format=webp&quality=lossless&width=1024&height=577';
 const surveyStates = new Map();
+
+function loadAdminPoints() {
+  try {
+    return JSON.parse(fs.readFileSync(pointsFile, 'utf8'));
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveAdminPoints(points) {
+  fs.mkdirSync(path.dirname(pointsFile), { recursive: true });
+  fs.writeFileSync(pointsFile, JSON.stringify(points, null, 2));
+}
+
+function awardAdminPoints(userId) {
+  const points = loadAdminPoints();
+  const record = points[userId] || { points: 0, tickets: 0 };
+  record.points += 10;
+  record.tickets += 1;
+  points[userId] = record;
+  saveAdminPoints(points);
+  return record;
+}
+
+function markPointsAwarded(channel) {
+  const topic = channel.topic || '';
+  if (topic.includes('ticket-points-awarded')) return false;
+  channel.setTopic(`${topic} | ticket-points-awarded`).catch(error => console.error('Points topic update error:', error));
+  return true;
+}
 
 function surveyComplete(channelId) {
   const state = surveyStates.get(channelId);
@@ -217,9 +248,12 @@ async function transcript(channel) {
 async function closeTicket(interaction, deleteAfter = false) {
   if (!ticketOf(interaction.channel)) return interaction.reply({ content: 'هذا الأمر يعمل داخل قناة تذكرة فقط.', ephemeral: true });
   const ownerId = ticketOf(interaction.channel);
-  if (!isStaff(interaction.member) && ownerId !== interaction.user.id) return interaction.reply({ content: 'لا تملك صلاحية إغلاق هذه التذكرة.', ephemeral: true });
+  const claimedStaffId = claimedStaffOf(interaction.channel);
+  if (!claimedStaffId) return interaction.reply({ content: 'يجب استلام التذكرة أولًا قبل إغلاقها أو حذفها.', ephemeral: true });
+  if (interaction.user.id !== claimedStaffId) return interaction.reply({ content: 'فقط الإداري الذي استلم التذكرة يستطيع إغلاقها أو حذفها.', ephemeral: true });
   if (!surveyComplete(interaction.channel.id)) return interaction.reply({ content: 'لا يمكن إنهاء التذكرة قبل إرسال نموذج التقييم واكتماله.', ephemeral: true });
   await interaction.deferReply({ ephemeral: true });
+  if (markPointsAwarded(interaction.channel)) awardAdminPoints(interaction.user.id);
   const file = await transcript(interaction.channel);
   let downloadSent = false;
   if (deleteAfter) {
@@ -370,6 +404,24 @@ client.on(Events.MessageCreate, async message => {
   try {
     if (message.author.bot || !message.guild) return;
     const command = message.content.trim().replace(/[إأآ]/g, 'ا');
+    if (command.toLowerCase() === 'mp') {
+      if (!isStaff(message.member)) return message.reply('هذا الأمر للإداريين فقط.');
+      const record = loadAdminPoints()[message.author.id] || { points: 0, tickets: 0 };
+      const embed = new EmbedBuilder()
+        .setColor(config.brandColor)
+        .setAuthor({ name: `${message.member?.displayName || message.author.username} • نقاط الإدارة`, iconURL: message.author.displayAvatarURL({ size: 128 }) })
+        .setTitle('🏅 رصيد النقاط الإدارية')
+        .setDescription(`هذه إحصائياتك يا ${message.author}.`)
+        .addFields(
+          { name: '⭐ النقاط', value: `**${record.points}** نقطة`, inline: true },
+          { name: '🎫 التذاكر المنجزة', value: `**${record.tickets}** تذكرة`, inline: true },
+          { name: '📌 طريقة الاحتساب', value: '10 نقاط عند إغلاق أو حذف تذكرة استلمتها.', inline: false }
+        )
+        .setFooter({ text: config.brandName })
+        .setTimestamp();
+      await message.channel.send({ embeds: [embed] });
+      return;
+    }
     if (command === 'تفضل') {
       if (!ticketOf(message.channel) || !isStaff(message.member)) return;
       await message.delete().catch(error => console.error('Greeting message delete error:', error));
@@ -386,8 +438,9 @@ client.on(Events.MessageCreate, async message => {
     }
     if (!['اغلاق التكت', 'اغلاق التذكرة', 'اغلاق'].includes(command)) return;
     if (!ticketOf(message.channel)) return message.reply('هذا الأمر يعمل داخل قناة تذكرة فقط.');
-    if (!isStaff(message.member)) return message.reply('هذا الأمر للإداريين فقط.');
+    if (claimedStaffOf(message.channel) !== message.author.id) return message.reply('فقط الإداري الذي استلم التذكرة يستطيع إغلاقها.');
     if (!surveyComplete(message.channel.id)) return message.reply('لا يمكن إنهاء التذكرة قبل إرسال نموذج التقييم واكتماله. اكتب `نموذج` أولًا.');
+    if (markPointsAwarded(message.channel)) awardAdminPoints(message.author.id);
     await message.reply('جاري إغلاق التذكرة...');
     await message.channel.permissionOverwrites.edit(ticketOf(message.channel), { SendMessages: false }).catch(() => {});
     await message.channel.setName(`closed-${message.channel.name.replace(/^closed-/, '')}`).catch(() => {});
