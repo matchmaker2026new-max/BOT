@@ -13,6 +13,7 @@ module.exports = {
   ticketBannerUrl: imageUrl(process.env.TICKET_BANNER_URL || process.env.PANEL_BANNER_URL),
   ticketCategoryId: process.env.TICKET_CATEGORY_ID || null,
   staffRoleId: process.env.STAFF_ROLE_ID || null,
+  ticketStaffRoleIds: ['1546284686530318388', '1546283624331092048'],
   transcriptChannelId: process.env.TRANSCRIPT_CHANNEL_ID || null,
   ratingsChannelId: process.env.RATINGS_CHANNEL_ID || '1520221660098203749',
   ticketPrefix: 'ticket',

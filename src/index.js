@@ -16,6 +16,7 @@ const client = new Client({
 });
 
 const safe = value => String(value || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
+const isTicketStaff = member => Boolean(member && config.ticketStaffRoleIds.some(roleId => member.roles.cache.has(roleId)));
 const isStaff = member => Boolean(member && (
   member.permissions.has(PermissionsBitField.Flags.Administrator) ||
   member.permissions.has(PermissionsBitField.Flags.ManageChannels) ||
@@ -113,6 +114,16 @@ function typeMenu() {
   );
 }
 
+function ticketControls(claimed = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(claimed ? 'ticket_release' : 'ticket_claim').setLabel(claimed ? 'ترك' : 'استلام').setEmoji(claimed ? '↩️' : '✅').setStyle(claimed ? ButtonStyle.Secondary : ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('ticket_add_member').setLabel('إضافة عضو').setEmoji('➕').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('ticket_remove_member').setLabel('إزالة عضو').setEmoji('➖').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('ticket_close').setLabel('إغلاق').setEmoji('🔒').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId('ticket_delete').setLabel('حذف').setEmoji('🗑️').setStyle(ButtonStyle.Secondary)
+  );
+}
+
 function panelEmbed() {
   const e = new EmbedBuilder().setColor(config.brandColor)
     .setTitle('📜 قوانين التذكرة')
@@ -137,7 +148,7 @@ async function createTicket(interaction, type, subject, description, link, ids) 
     { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
     { id: guild.members.me.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] }
   ];
-  if (config.staffRoleId) overwrites.push({ id: config.staffRoleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
+  for (const roleId of config.ticketStaffRoleIds) overwrites.push({ id: roleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
   const channel = await guild.channels.create({
     name: `${config.ticketPrefix}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9\-_]/g, '').slice(0, 80) || `${config.ticketPrefix}-${interaction.user.id.slice(-4)}`,
     type: ChannelType.GuildText,
@@ -151,13 +162,7 @@ async function createTicket(interaction, type, subject, description, link, ids) 
     .setDescription(`تم فتح التذكرة <@${interaction.user.id}>\n\nاكتب طلبك هنا وسيقوم فريق الدعم بالرد عليك.`)
     .setFooter({ text: `${config.brandName} • فريق الدعم` });
   embed.setImage(bannerUrl);
-  const controls = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('ticket_claim').setLabel('استلام').setEmoji('✅').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('ticket_add_member').setLabel('إضافة عضو').setEmoji('➕').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('ticket_remove_member').setLabel('إزالة عضو').setEmoji('➖').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('ticket_close').setLabel('إغلاق').setEmoji('🔒').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('ticket_delete').setLabel('حذف').setEmoji('🗑️').setStyle(ButtonStyle.Secondary)
-  );
+  const controls = ticketControls();
   await interaction.editReply({ content: `تم إنشاء التذكرة داخل الفئة المطلوبة: ${channel}` });
   await channel.send({ content: `<@${interaction.user.id}> ${config.staffRoleId ? `<@&${config.staffRoleId}>` : ''}`, embeds: [embed], components: [controls] }).catch(error => console.error('Ticket message error:', error));
 }
@@ -251,6 +256,7 @@ async function closeTicket(interaction, deleteAfter = false) {
   const ownerId = ticketOf(interaction.channel);
   const claimedStaffId = claimedStaffOf(interaction.channel);
   if (!claimedStaffId) return interaction.reply({ content: 'يجب استلام التذكرة أولًا قبل إغلاقها أو حذفها.', ephemeral: true });
+  if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'هذه العملية متاحة للرتب المحددة فقط.', ephemeral: true });
   if (interaction.user.id !== claimedStaffId) return interaction.reply({ content: 'فقط الإداري الذي استلم التذكرة يستطيع إغلاقها أو حذفها.', ephemeral: true });
   await interaction.deferReply({ ephemeral: true });
   if (markPointsAwarded(interaction.channel)) awardAdminPoints(interaction.user.id);
@@ -363,7 +369,7 @@ client.on(Events.InteractionCreate, async interaction => {
       return await createTicket(interaction, type, interaction.fields.getTextInputValue('subject'), interaction.fields.getTextInputValue('description'), interaction.fields.getTextInputValue('link'), interaction.user.id);
     }
     if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_member:')) {
-      if (!isStaff(interaction.member)) return interaction.reply({ content: 'هذا الزر للإداريين فقط.', ephemeral: true });
+      if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'هذا الزر للرتب المحددة فقط.', ephemeral: true });
       if (!ticketOf(interaction.channel)) return interaction.reply({ content: 'هذا الزر يعمل داخل التذكرة فقط.', ephemeral: true });
       const action = interaction.customId.split(':')[1];
       const memberId = memberIdFromInput(interaction.fields.getTextInputValue('member'));
@@ -377,15 +383,25 @@ client.on(Events.InteractionCreate, async interaction => {
     }
     if (interaction.isButton()) {
       if (['ticket_add_member', 'ticket_remove_member'].includes(interaction.customId)) {
-        if (!isStaff(interaction.member)) return interaction.reply({ content: 'هذا الزر للإداريين فقط.', ephemeral: true });
+        if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'هذا الزر للرتب المحددة فقط.', ephemeral: true });
         return interaction.showModal(memberModal(interaction.customId === 'ticket_add_member' ? 'add' : 'remove'));
       }
       if (interaction.customId === 'ticket_claim') {
-        if (!isStaff(interaction.member)) return interaction.reply({ content: 'الاستلام متاح لفريق الدعم فقط.', ephemeral: true });
+        if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'الاستلام متاح للرتب المحددة فقط.', ephemeral: true });
+        if (claimedStaffOf(interaction.channel)) return interaction.reply({ content: 'التذكرة مستلمة من إداري آخر.', ephemeral: true });
         const topic = interaction.channel.topic || '';
-        const updatedTopic = topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, '');
+        const updatedTopic = topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, '').replace(/\s*\|\s*ticket-points-awarded/, '');
         await interaction.channel.setTopic(`${updatedTopic} | ticket-claimed-by:${interaction.user.id}`);
+        await interaction.message.edit({ components: [ticketControls(true)] });
         await interaction.channel.send(`✅ تم استلام التذكرة بواسطة ${interaction.user}.`); return interaction.reply({ content: 'تم استلام التذكرة.', ephemeral: true });
+      }
+      if (interaction.customId === 'ticket_release') {
+        if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'ترك التذكرة متاح للرتب المحددة فقط.', ephemeral: true });
+        if (claimedStaffOf(interaction.channel) !== interaction.user.id) return interaction.reply({ content: 'فقط الإداري المستلم يستطيع ترك التذكرة.', ephemeral: true });
+        const topic = interaction.channel.topic || '';
+        await interaction.channel.setTopic(topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, ''));
+        await interaction.message.edit({ components: [ticketControls(false)] });
+        return interaction.reply({ content: 'تم ترك التذكرة، وأصبحت متاحة لإداري آخر.', ephemeral: true });
       }
       if (interaction.customId === 'ticket_close') return closeTicket(interaction);
       if (interaction.customId === 'ticket_delete') return closeTicket(interaction, true);
@@ -404,8 +420,12 @@ client.on(Events.MessageCreate, async message => {
   try {
     if (message.author.bot || !message.guild) return;
     const command = message.content.trim().replace(/[إأآ]/g, 'ا');
+    if (command === '!كيزام') {
+      await message.channel.send('<@1256322885669228556>');
+      return;
+    }
     if (command.toLowerCase() === 'mp') {
-      if (!isStaff(message.member)) return message.reply('هذا الأمر للإداريين فقط.');
+      if (!isTicketStaff(message.member)) return message.reply('هذا الأمر للرتب المحددة فقط.');
       const record = loadAdminPoints()[message.author.id] || { points: 0, tickets: 0 };
       const embed = new EmbedBuilder()
         .setColor(config.brandColor)
@@ -423,7 +443,7 @@ client.on(Events.MessageCreate, async message => {
       return;
     }
     if (command === 'تفضل') {
-      if (!ticketOf(message.channel) || !isStaff(message.member)) return;
+      if (!ticketOf(message.channel) || !isTicketStaff(message.member)) return;
       await message.delete().catch(error => console.error('Greeting message delete error:', error));
       const staffId = claimedStaffOf(message.channel) || message.author.id;
       const firstEmoji = serverEmoji(message.guild, '2434darkbluecrown');
@@ -436,7 +456,7 @@ client.on(Events.MessageCreate, async message => {
     }
     if (command === 'نموذج') {
       if (!ticketOf(message.channel)) return message.reply('هذا الأمر يعمل داخل قناة تذكرة فقط.');
-      if (!isStaff(message.member)) return message.reply('هذا الأمر للإداريين فقط.');
+      if (!isTicketStaff(message.member)) return message.reply('هذا الأمر للرتب المحددة فقط.');
       return showSurvey(message);
     }
     if (!['اغلاق التكت', 'اغلاق التذكرة', 'اغلاق'].includes(command)) return;
