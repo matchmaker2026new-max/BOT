@@ -148,7 +148,11 @@ async function createTicket(interaction, type, subject, description, link, ids) 
     { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
     { id: guild.members.me.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] }
   ];
-  for (const roleId of config.ticketStaffRoleIds) overwrites.push({ id: roleId, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] });
+  for (const roleId of config.ticketStaffRoleIds) overwrites.push({
+    id: roleId,
+    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
+    deny: [PermissionsBitField.Flags.SendMessages]
+  });
   const channel = await guild.channels.create({
     name: `${config.ticketPrefix}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9\-_]/g, '').slice(0, 80) || `${config.ticketPrefix}-${interaction.user.id.slice(-4)}`,
     type: ChannelType.GuildText,
@@ -392,6 +396,11 @@ client.on(Events.InteractionCreate, async interaction => {
         const topic = interaction.channel.topic || '';
         const updatedTopic = topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, '').replace(/\s*\|\s*ticket-points-awarded/, '');
         await interaction.channel.setTopic(`${updatedTopic} | ticket-claimed-by:${interaction.user.id}`);
+        await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true
+        });
         await interaction.message.edit({ components: [ticketControls(true)] });
         await interaction.channel.send(`✅ تم استلام التذكرة بواسطة ${interaction.user}.`); return interaction.reply({ content: 'تم استلام التذكرة.', ephemeral: true });
       }
@@ -400,6 +409,11 @@ client.on(Events.InteractionCreate, async interaction => {
         if (claimedStaffOf(interaction.channel) !== interaction.user.id) return interaction.reply({ content: 'فقط الإداري المستلم يستطيع ترك التذكرة.', ephemeral: true });
         const topic = interaction.channel.topic || '';
         await interaction.channel.setTopic(topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, ''));
+        await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+          ViewChannel: true,
+          SendMessages: false,
+          ReadMessageHistory: true
+        });
         await interaction.message.edit({ components: [ticketControls(false)] });
         return interaction.reply({ content: 'تم ترك التذكرة، وأصبحت متاحة لإداري آخر.', ephemeral: true });
       }
