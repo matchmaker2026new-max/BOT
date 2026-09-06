@@ -1,0 +1,17 @@
+{
+  "name": "zero-style-ticket-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Professional Arabic Discord ticket bot inspired by the supplied design",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "deploy-commands": "node src/deploy-commands.js"
+  },
+  "engines": { "node": ">=18.17.0" },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}
