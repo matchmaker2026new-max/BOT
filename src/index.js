@@ -176,7 +176,10 @@ async function createTicket(interaction, type, subject, description, link, ids) 
   embed.setImage(bannerUrl);
   const controls = ticketControls();
   await interaction.editReply({ content: `تم إنشاء التذكرة داخل الفئة المطلوبة: ${channel}` });
-  const staffMentions = availableStaffRoleIds.map(roleId => `<@&${roleId}>`).join(' ');
+  const staffMentions = config.ticketMentionRoleIds
+    .filter(roleId => guild.roles.cache.has(roleId))
+    .map(roleId => `<@&${roleId}>`)
+    .join(' ');
   await channel.send({ content: `<@${interaction.user.id}> ${staffMentions}`, embeds: [embed], components: [controls] }).catch(error => console.error('Ticket message error:', error));
 }
 

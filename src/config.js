@@ -14,6 +14,7 @@ module.exports = {
   ticketCategoryId: process.env.TICKET_CATEGORY_ID || null,
   staffRoleId: process.env.STAFF_ROLE_ID || null,
   ticketStaffRoleIds: ['1546284686530318388', '1546283624331092048', '1544497333511913573'],
+  ticketMentionRoleIds: ['1546298019794780260', '1546298041193988208'],
   transcriptChannelId: process.env.TRANSCRIPT_CHANNEL_ID || null,
   ratingsChannelId: process.env.RATINGS_CHANNEL_ID || '1520221660098203749',
   ticketPrefix: 'ticket',
