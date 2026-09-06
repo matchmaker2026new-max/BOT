@@ -22,6 +22,7 @@ const isStaff = member => Boolean(member && (
   (config.staffRoleId && member.roles.cache.has(config.staffRoleId))
 ));
 const ticketOf = channel => channel.topic?.match(/ticket-owner:(\d+)/)?.[1] || null;
+const claimedStaffOf = channel => channel.topic?.match(/ticket-claimed-by:(\d+)/)?.[1] || null;
 const localPanelImage = path.join(__dirname, '..', 'assets', 'panel.png');
 const hasLocalPanelImage = () => fs.existsSync(localPanelImage);
 const bannerUrl = 'https://media.discordapp.net/attachments/1545552204998512751/1546065695928881172/Untitled41_20260507131326-1-1-1.png?ex=6a9e6d62&is=6a9d1be2&hm=dcedf72322d11ff1f4652bc9cf51778339642039aa81ef12ac484c52d8bf9b26&format=webp&quality=lossless&width=1024&height=577';
@@ -347,6 +348,9 @@ client.on(Events.InteractionCreate, async interaction => {
       }
       if (interaction.customId === 'ticket_claim') {
         if (!isStaff(interaction.member)) return interaction.reply({ content: 'الاستلام متاح لفريق الدعم فقط.', ephemeral: true });
+        const topic = interaction.channel.topic || '';
+        const updatedTopic = topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, '');
+        await interaction.channel.setTopic(`${updatedTopic} | ticket-claimed-by:${interaction.user.id}`);
         await interaction.channel.send(`✅ تم استلام التذكرة بواسطة ${interaction.user}.`); return interaction.reply({ content: 'تم استلام التذكرة.', ephemeral: true });
       }
       if (interaction.customId === 'ticket_close') return closeTicket(interaction);
@@ -369,8 +373,9 @@ client.on(Events.MessageCreate, async message => {
     if (command === 'تفضل') {
       if (!ticketOf(message.channel) || !isStaff(message.member)) return;
       await message.delete().catch(error => console.error('Greeting message delete error:', error));
+      const staffId = claimedStaffOf(message.channel) || message.author.id;
       await message.channel.send(
-        `:B5: تفضل معاك الإداري ${message.author} <:emoji_191:915647976058277918>\nكيف أقدر أساعدك اليوم؟`
+        `:B5: تفضل معاك الإداري <@${staffId}> <:emoji_191:915647976058277918>\nكيف أقدر أساعدك اليوم؟`
       );
       return;
     }
