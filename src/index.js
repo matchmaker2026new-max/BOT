@@ -251,7 +251,6 @@ async function closeTicket(interaction, deleteAfter = false) {
   const claimedStaffId = claimedStaffOf(interaction.channel);
   if (!claimedStaffId) return interaction.reply({ content: 'يجب استلام التذكرة أولًا قبل إغلاقها أو حذفها.', ephemeral: true });
   if (interaction.user.id !== claimedStaffId) return interaction.reply({ content: 'فقط الإداري الذي استلم التذكرة يستطيع إغلاقها أو حذفها.', ephemeral: true });
-  if (!surveyComplete(interaction.channel.id)) return interaction.reply({ content: 'لا يمكن إنهاء التذكرة قبل إرسال نموذج التقييم واكتماله.', ephemeral: true });
   await interaction.deferReply({ ephemeral: true });
   if (markPointsAwarded(interaction.channel)) awardAdminPoints(interaction.user.id);
   const file = await transcript(interaction.channel);
@@ -439,7 +438,6 @@ client.on(Events.MessageCreate, async message => {
     if (!['اغلاق التكت', 'اغلاق التذكرة', 'اغلاق'].includes(command)) return;
     if (!ticketOf(message.channel)) return message.reply('هذا الأمر يعمل داخل قناة تذكرة فقط.');
     if (claimedStaffOf(message.channel) !== message.author.id) return message.reply('فقط الإداري الذي استلم التذكرة يستطيع إغلاقها.');
-    if (!surveyComplete(message.channel.id)) return message.reply('لا يمكن إنهاء التذكرة قبل إرسال نموذج التقييم واكتماله. اكتب `نموذج` أولًا.');
     if (markPointsAwarded(message.channel)) awardAdminPoints(message.author.id);
     await message.reply('جاري إغلاق التذكرة...');
     await message.channel.permissionOverwrites.edit(ticketOf(message.channel), { SendMessages: false }).catch(() => {});
