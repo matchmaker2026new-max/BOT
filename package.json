@@ -1,13 +1,12 @@
 {
-  "name": "zero-style-ticket-bot",
+  "name": "arabic-discord-utility-bot",
   "version": "1.0.0",
-  "private": true,
-  "description": "Professional Arabic Discord ticket bot inspired by the supplied design",
+  "description": "Arabic Discord moderation and utility bot with slash commands and Arabic shortcuts",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "deploy-commands": "node src/deploy-commands.js"
+    "deploy": "node src/deploy-commands.js"
   },
   "engines": { "node": ">=18.17.0" },
   "dependencies": {

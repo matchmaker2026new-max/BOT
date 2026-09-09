@@ -1,511 +1,478 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const {
-  Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder,
-  ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, ModalBuilder,
-  TextInputBuilder, TextInputStyle, PermissionsBitField, ChannelType,
-  AttachmentBuilder, Events
+  Client, GatewayIntentBits, Partials, PermissionFlagsBits,
+  EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes
 } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-const config = require('./config');
+const { token, clientId, guildId, prefix, ownerId } = require('./config');
+const store = require('./store');
 
-if (!config.token) throw new Error('DISCORD_TOKEN غير موجود في .env');
+const instanceLockPath = path.join(__dirname, '..', '.bot.lock');
+function ensureSingleInstance() {
+  try {
+    if (fs.existsSync(instanceLockPath)) {
+      const prevPid = Number(String(fs.readFileSync(instanceLockPath, 'utf8')).trim());
+      if (Number.isInteger(prevPid) && prevPid > 0) {
+        try {
+          process.kill(prevPid, 0);
+          console.error('⚠️ البوت يعمل بالفعل. لا تشغل أكثر من نسخة واحدة.');
+          process.exit(1);
+        } catch {
+          fs.unlinkSync(instanceLockPath);
+        }
+      } else {
+        fs.unlinkSync(instanceLockPath);
+      }
+    }
+    fs.writeFileSync(instanceLockPath, String(process.pid), 'utf8');
+  } catch (error) {
+    console.error('⚠️ تعذر إنشاء قفل التشغيل:', error.message);
+    process.exit(1);
+  }
+}
+ensureSingleInstance();
+process.on('exit', () => {
+  try {
+    const currentPid = String(fs.readFileSync(instanceLockPath, 'utf8')).trim();
+    if (currentPid === String(process.pid)) fs.unlinkSync(instanceLockPath);
+  } catch (_) {}
+});
 
+if (!token || !clientId) throw new Error('ضع DISCORD_TOKEN و CLIENT_ID في ملف .env');
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel]
 });
+const COLOR = 0x5865f2;
+const EMOJIS = { ok: '✦', error: '✧', mod: '🛡️', time: '⏱️', trash: '🧹', ban: '🔨', kick: '👢', lock: '🔒', unlock: '🔓', gift: '🎁', bell: '🔔', info: '💠' };
+const TAX_CHANNEL_ID = '1545360870488539287';
+const FEEDBACK_CHANNEL_ID = '1520221295944400957';
+const TAX_RATE = 0.05;
 
-const safe = value => String(value || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]));
-const isTicketStaff = member => Boolean(member && config.ticketStaffRoleIds.some(roleId => member.roles.cache.has(roleId)));
-const isStaff = member => Boolean(member && (
-  member.permissions.has(PermissionsBitField.Flags.Administrator) ||
-  member.permissions.has(PermissionsBitField.Flags.ManageChannels) ||
-  (config.staffRoleId && member.roles.cache.has(config.staffRoleId))
-));
-const ticketOf = channel => channel.topic?.match(/ticket-owner:(\d+)/)?.[1] || null;
-const claimedStaffOf = channel => channel.topic?.match(/ticket-claimed-by:(\d+)/)?.[1] || null;
-const serverEmoji = (guild, name) => guild.emojis.cache.find(emoji => emoji.name === name)?.toString() || '';
-const pointsFile = path.join(__dirname, '..', 'data', 'admin-points.json');
-const localPanelImage = path.join(__dirname, '..', 'assets', 'panel.png');
-const hasLocalPanelImage = () => fs.existsSync(localPanelImage);
-const bannerUrl = 'https://media.discordapp.net/attachments/1545552204998512751/1546065695928881172/Untitled41_20260507131326-1-1-1.png?ex=6a9e6d62&is=6a9d1be2&hm=dcedf72322d11ff1f4652bc9cf51778339642039aa81ef12ac484c52d8bf9b26&format=webp&quality=lossless&width=1024&height=577';
-const surveyStates = new Map();
-
-function loadAdminPoints() {
-  try {
-    return JSON.parse(fs.readFileSync(pointsFile, 'utf8'));
-  } catch (error) {
-    return {};
-  }
-}
-
-function saveAdminPoints(points) {
-  fs.mkdirSync(path.dirname(pointsFile), { recursive: true });
-  fs.writeFileSync(pointsFile, JSON.stringify(points, null, 2));
-}
-
-function awardAdminPoints(userId) {
-  const points = loadAdminPoints();
-  const record = points[userId] || { points: 0, tickets: 0 };
-  record.points += 10;
-  record.tickets += 1;
-  points[userId] = record;
-  saveAdminPoints(points);
-  return record;
-}
-
-function markPointsAwarded(channel) {
-  const topic = channel.topic || '';
-  if (topic.includes('ticket-points-awarded')) return false;
-  channel.setTopic(`${topic} | ticket-points-awarded`).catch(error => console.error('Points topic update error:', error));
-  return true;
-}
-
-function surveyComplete(channelId) {
-  const state = surveyStates.get(channelId);
-  return Boolean(state?.admin && state?.service && state?.speed);
-}
-
-async function publishSurveyResult(channel, state, surveyMessage = state.surveyMessage) {
-  if (state.resultSent) return;
-  const embed = surveyEmbed(state);
-  let published = false;
-  await channel.send({ content: `<@${state.ownerId}>`, embeds: [embed] })
-    .then(() => { published = true; })
-    .catch(error => console.error('Survey result in ticket error:', error));
-  if (surveyMessage) await surveyMessage.edit({ components: [] }).catch(error => console.error('Survey form cleanup error:', error));
-  state.resultSent = published;
-  if (!published) return;
-  if (config.ratingsChannelId && config.ratingsChannelId !== channel.id) {
-    const ratingsChannel = await channel.guild.channels.fetch(config.ratingsChannelId).catch(() => null);
-    if (ratingsChannel?.isTextBased()) {
-      await ratingsChannel.send({ embeds: [embed] }).catch(error => console.error('Survey ratings channel error:', error));
-    } else {
-      console.error(`Ratings channel not found or is not text-based: ${config.ratingsChannelId}`);
-    }
-  }
-}
-
-const ticketOptions = {
-  nitro: { label: 'نـيـتـرو', emoji: { id: '1532262943708680395', name: 'NitroActivate', animated: true }, description: 'شراء أو تفعيل Nitro', color: 0x5865f2 },
-  effects: { label: 'افـيكتـات', emoji: { id: '1494960318886055996', name: '6FA1', animated: true }, description: 'شراء أو طلب إيفكتات', color: 0x9b59b6 },
-  visa: { label: 'فـيـزا', emoji: { id: '1538863370088873984', name: 'Visa', animated: false }, description: 'خدمات الفيزا والدفع', color: 0x3498db },
-  credit: { label: 'كـرديـت', emoji: { id: '1353307920183459980', name: 'credit', animated: true }, description: 'شراء كريدت', color: 0x2ecc71 },
-  subscriptions: { label: 'اشـتـركـات', emoji: { id: '1522575696239661156', name: 'd_netflix', animated: true }, description: 'الاشتراكات الرقمية', color: 0xe74c3c },
-  other: { label: 'اخـرى', emoji: { id: '1541593884591788208', name: 'stock', animated: false }, description: 'أي طلب آخر', color: 0xf1c40f },
-  reset: { label: 'ريـسـت', emoji: { id: '1526965959720439971', name: 'loading', animated: true }, description: 'تحديث قائمة الخيارات', color: 0x95a5a6 }
+const MOD_ROLE_ID = '1546616567016722463';
+const modCommands = new Set(['clear', 'ban', 'kick', 'timeout', 'untimeout', 'mute', 'lock', 'unlock', 'hide', 'add-user', 'remove-user', 'delete', 'autoreply-add', 'autoreply-remove', 'line-mode', 'logs-info', 'nickname', 'protection-status', 'remove-all-tokens', 'remove-autoline-channel', 'remove-nadeko-room', 'remove-token', 'rename', 'role', 'send', 'send-broadcast-panel', 'set-autoline-line', 'set-feedback-line', 'set-feedback-room', 'set-message', 'set-project-logs', 'set-shortcut', 'set-suggestions-line', 'set-suggestions-room', 'set-tax-line', 'set-tax-room', 'setup-logs', 'setup-rating', 'setup-welcome', 'suggestion-mode', 'tax', 'come']);
+const defs = [
+  ['add-autoline-channel', 'تحديد قناة الخط التلقائي', [{ name: 'channel', description: 'القناة', type: 7, required: true }]],
+  ['add-button', 'إرسال زر تفاعلي', [{ name: 'text', description: 'نص الزر', type: 3, required: true }]],
+  ['add-info-button', 'إرسال زر معلومات', [{ name: 'text', description: 'المعلومات التي تظهر عند الضغط', type: 3, required: true }]],
+  ['add-nadeko-room', 'تحديد غرفة Nadeko', [{ name: 'channel', description: 'القناة', type: 7, required: true }]],
+  ['add-ticket-button', 'إرسال زر تذكرة', [{ name: 'text', description: 'نص الزر', type: 3, required: false }]],
+  ['clear', 'مسح عدد من الرسائل', [{ name: 'amount', description: 'عدد الرسائل من 1 إلى 100', type: 4, required: false }]],
+  ['ban', 'حظر عضو من السيرفر', [{ name: 'user', description: 'العضو المطلوب حظره', type: 6, required: true }, { name: 'reason', description: 'سبب الحظر', type: 3, required: false }]],
+  ['kick', 'طرد عضو من السيرفر', [{ name: 'user', description: 'العضو المطلوب طرده', type: 6, required: true }, { name: 'reason', description: 'سبب الطرد', type: 3, required: false }]],
+  ['timeout', 'كتم عضو لمدة بالدقائق', [{ name: 'user', description: 'العضو المطلوب كتمه', type: 6, required: true }, { name: 'minutes', description: 'المدة بالدقائق', type: 4, required: false }]],
+  ['untimeout', 'إزالة الكتم عن عضو', [{ name: 'user', description: 'العضو', type: 6, required: true }]],
+  ['anti-ban', 'تفعيل أو تعطيل حماية الحظر', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['anti-bots', 'تفعيل أو تعطيل حماية البوتات', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['anti-delete-roles', 'حماية الرتب من الحذف', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['anti-delete-rooms', 'حماية القنوات من الحذف', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['autoreply-add', 'إضافة رد تلقائي', [{ name: 'trigger', description: 'الكلمة', type: 3, required: true }, { name: 'reply', description: 'الرد', type: 3, required: true }]],
+  ['autoreply-list', 'عرض الردود التلقائية', []],
+  ['autoreply-remove', 'حذف رد تلقائي', [{ name: 'trigger', description: 'الكلمة', type: 3, required: true }]],
+  ['avatar', 'عرض صورة عضو', [{ name: 'user', description: 'العضو', type: 6, required: false }]],
+  ['banner', 'عرض بانر عضو', [{ name: 'user', description: 'العضو', type: 6, required: false }]],
+  ['close', 'قفل القناة الحالية', []],
+  ['close-apply', 'قفل قناة التقديم', []],
+  ['copy-emoji', 'نسخ رابط إيموجي', [{ name: 'emoji', description: 'الإيموجي أو منشن الإيموجي', type: 3, required: true }]],
+  ['delete', 'حذف رسالة الأمر', []],
+  ['dm-mode', 'تفعيل أو تعطيل وضع الخاص', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['feedback-mode', 'تفعيل أو تعطيل وضع التقييم', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['gend', 'بدء سحب مختصر', [{ name: 'seconds', description: 'المدة بالثواني', type: 4, required: true }, { name: 'prize', description: 'الجائزة', type: 3, required: true }]],
+  ['greroll', 'إعادة اختيار فائز السحب', [{ name: 'message', description: 'معرف رسالة السحب', type: 3, required: true }]],
+  ['gstart', 'بدء سحب تفاعلي', [{ name: 'seconds', description: 'المدة بالثواني', type: 4, required: true }, { name: 'prize', description: 'الجائزة', type: 3, required: true }]],
+  ['lock', 'قفل القناة الحالية', []], ['unlock', 'فتح القناة الحالية', []], ['hide', 'إخفاء القناة عن الأعضاء', []],
+  ['add-user', 'إضافة عضو إلى القناة', [{ name: 'user', description: 'العضو', type: 6, required: true }]],
+  ['remove-user', 'إزالة عضو من القناة', [{ name: 'user', description: 'العضو', type: 6, required: true }]],
+  ['serverinfo', 'عرض معلومات السيرفر', []], ['userinfo', 'عرض معلومات عضو', [{ name: 'user', description: 'العضو', type: 6, required: false }]],
+  ['say', 'إرسال رسالة باسم البوت', [{ name: 'text', description: 'نص الرسالة', type: 3, required: true }]],
+  ['send', 'إرسال رسالة في القناة', [{ name: 'text', description: 'نص الرسالة', type: 3, required: true }]],
+  ['embed', 'إرسال رسالة Embed', [{ name: 'text', description: 'نص الرسالة', type: 3, required: true }, { name: 'color', description: 'لون Hex مثل #ff0000 أو اسم لون', type: 3, required: false }]],
+  ['come', 'استدعاء عضو في الخاص', [{ name: 'user', description: 'العضو', type: 6, required: true }]],
+  ['nickname', 'تغيير لقب عضو', [{ name: 'user', description: 'العضو', type: 6, required: true }, { name: 'name', description: 'اللقب الجديد', type: 3, required: false }]],
+  ['ping', 'فحص سرعة استجابة البوت', []],
+  ['protection-status', 'عرض حالة الحماية', []],
+  ['logs-info', 'عرض حالة سجل الإدارة', []],
+  ['line-mode', 'تفعيل أو تعطيل خط الرسائل', [{ name: 'enabled', description: 'تشغيل أو إيقاف', type: 5, required: true }]],
+  ['send-broadcast-panel', 'إرسال لوحة بث تفاعلية', []],
+  ['set-autoline-line', 'تحديد رسالة الخط التلقائي', [{ name: 'text', description: 'نص الخط', type: 3, required: true }]],
+  ['set-feedback-line', 'تحديد رسالة خط التقييم', [{ name: 'text', description: 'نص الخط', type: 3, required: true }]],
+  ['set-feedback-room', 'تحديد قناة التقييم', [{ name: 'channel', description: 'القناة', type: 7, required: true }]],
+  ['set-message', 'تحديد رسالة تلقائية للقناة', [{ name: 'text', description: 'الرسالة', type: 3, required: true }]],
+  ['set-project-logs', 'تحديد قناة سجلات المشروع', [{ name: 'channel', description: 'القناة', type: 7, required: true }]],
+  ['set-shortcut', 'حفظ اختصار لأمر', [{ name: 'shortcut', description: 'الاختصار', type: 3, required: true }, { name: 'command', description: 'الأمر', type: 3, required: true }]],
+  ['set-suggestions-line', 'تحديد خط الاقتراحات', [{ name: 'text', description: 'نص الخط', type: 3, required: true }]],
+  ['set-suggestions-room', 'تحديد قناة الاقتراحات', [{ name: 'channel', description: 'القناة', type: 7, required: true }]],
+  ['set-tax-line', 'تحديد خط الضرائب', [{ name: 'text', description: 'نص الخط', type: 3, required: true }]],
+  ['set-tax-room', 'تحديد قناة الضرائب', [{ name: 'channel', description: 'القناة', type: 7, required: true }]],
+  ['setup-logs', 'إعداد نظام السجلات', []],
+  ['setup-rating', 'إعداد نظام التقييم', []],
+  ['setup-welcome', 'إعداد الترحيب', []],
+  ['mute', 'كتم عضو', [{ name: 'user', description: 'العضو', type: 6, required: true }, { name: 'minutes', description: 'المدة بالدقائق', type: 4, required: false }]],
+  ['new-apply', 'إرسال لوحة تقديم', []],
+  ['new-panel', 'إرسال لوحة تفاعلية', []],
+  ['remove-all-tokens', 'حذف كل التوكنات المحفوظة', []],
+  ['remove-autoline-channel', 'إزالة قناة الخط التلقائي', []],
+  ['remove-nadeko-room', 'إزالة غرفة Nadeko', []],
+  ['remove-token', 'حذف توكن محفوظ', [{ name: 'token', description: 'اسم التوكن', type: 3, required: true }]],
+  ['role', 'إضافة أو إزالة رتبة من عضو', [{ name: 'user', description: 'العضو', type: 6, required: true }, { name: 'role', description: 'الرتبة', type: 8, required: true }, { name: 'action', description: 'add أو remove', type: 3, required: false }]],
+  ['roles', 'عرض رتب السيرفر', []],
+  ['rename', 'تغيير اسم القناة', [{ name: 'name', description: 'الاسم الجديد', type: 3, required: true }]],
+  ['server', 'اختصار معلومات السيرفر', []],
+  ['suggestion-mode', 'تفعيل وضع الاقتراحات', []],
+  ['tax', 'حساب المبلغ بعد ضريبة 5%', [{ name: 'amount', description: 'المبلغ الصافي مثل 10m أو 500k', type: 3, required: true }]],
+  ['help', 'عرض قائمة الأوامر', []]
+];
+const slashCommands = defs.map(([name, description, options]) => ({ name, description, options, default_member_permissions: modCommands.has(name) ? String(PermissionFlagsBits.ManageMessages) : undefined }));
+const aliases = {
+  'م': 'clear', 'مسح': 'clear',
+  'كسرة': 'ban', 'ب': 'ban', 'باند': 'ban',
+  'ط': 'kick', 'طرد': 'kick',
+  'اص': 'timeout', 'ك': 'timeout', 'كتم': 'timeout',
+  'فك': 'untimeout',
+  'ق': 'lock', 'قفل': 'lock', 'فتح': 'unlock',
+  'اخفاء': 'hide', 'إخفاء': 'hide',
+  'اضافة': 'add-user', 'إضافة': 'add-user',
+  'حذف-عضو': 'remove-user', 'احذف': 'delete',
+  'صورة': 'avatar', 'افتار': 'avatar', 'بانر': 'banner',
+  'معلومات': 'serverinfo', 'سيرفر': 'serverinfo', 'عضو': 'userinfo',
+  'قول': 'say', 'ارسال': 'send', 'إرسال': 'send', 'امبد': 'embed',
+  'لقب': 'nickname', 'اسم': 'rename', 'رتبة': 'role', 'الرتب': 'roles',
+  'بنق': 'ping', 'حالة-الحماية': 'protection-status',
+  'خط': 'line-mode', 'اقتراحات': 'suggestion-mode', 'ضريبة': 'tax',
+  'حذف-التوكنات': 'remove-all-tokens', 'حذف-توكن': 'remove-token', 'حذف-خط': 'remove-autoline-channel',
+  'تعال': 'come', 'رد': 'autoreply-add', 'ردود': 'autoreply-list', 'حذف-رد': 'autoreply-remove',
+  'سحب': 'gstart', 'مساعدة': 'help', 'تحذير': 'warn'
 };
 
-const rulesText = [
-  '# قوانين التذكرة',
-  '',
-  '**1 يمنع إسبام المنشن، يرجى التحلي بالصبر!**',
-  '**2 يمنع إلغاء الطلب أو تغييره بعد تحويل المبلغ.**',
-  '**3 يمنع الاستهبال داخل التذكرة.**',
-  '**4 بعد إكمال طلبك يجب إرسال تقييم للخدمة.**',
-  '**5 الاحترام واجب داخل التذكرة!**'
-].join('\n');
-
-function typeMenu() {
-  return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId('ticket_type').setPlaceholder('🛒 اختر نوع الخدمة المطلوبة').addOptions(
-      Object.entries(ticketOptions).map(([value, item]) => ({ label: item.label, value, description: item.description, emoji: item.emoji }))
-    )
-  );
+function isMod(member) {
+  if (!member) return false;
+  return member.permissions?.has(PermissionFlagsBits.ManageGuild)
+    || member.permissions?.has(PermissionFlagsBits.ManageMessages)
+    || member.roles?.cache?.has(MOD_ROLE_ID)
+    || member.id === ownerId;
 }
-
-function ticketControls(claimed = false) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(claimed ? 'ticket_release' : 'ticket_claim').setLabel(claimed ? 'ترك' : 'استلام').setEmoji(claimed ? '↩️' : '✅').setStyle(claimed ? ButtonStyle.Secondary : ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('ticket_add_member').setLabel('إضافة عضو').setEmoji('➕').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('ticket_remove_member').setLabel('إزالة عضو').setEmoji('➖').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('ticket_close').setLabel('إغلاق').setEmoji('🔒').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('ticket_delete').setLabel('حذف').setEmoji('🗑️').setStyle(ButtonStyle.Secondary)
-  );
-}
-
-function panelEmbed() {
-  const e = new EmbedBuilder().setColor(config.brandColor)
-    .setTitle('📜 قوانين التذكرة')
-    .setDescription(rulesText)
-    .setFooter({ text: `${config.brandName} • اختر الخدمة من القائمة` });
-  e.setImage(bannerUrl);
-  return e;
-}
-
-async function sendPanel(channel) {
-  await channel.send({ embeds: [panelEmbed()], components: [typeMenu()] });
-}
-
-async function createTicket(interaction, type, subject, description, link, ids) {
-  const guild = interaction.guild;
-  await interaction.deferReply({ ephemeral: true });
-  const existing = guild.channels.cache.find(c => c.topic?.includes(`ticket-owner:${interaction.user.id}`));
-  if (existing) return interaction.editReply({ content: `لديك تذكرة مفتوحة بالفعل: ${existing}` });
-  const botMember = guild.members.me || await guild.members.fetch(interaction.client.user.id);
-  const category = config.ticketCategoryId ? guild.channels.cache.get(config.ticketCategoryId) : null;
-  if (config.ticketCategoryId && (!category || category.type !== ChannelType.GuildCategory)) {
-    return interaction.editReply({ content: `فئة التذاكر غير موجودة أو ليست فئة قنوات: ${config.ticketCategoryId}` });
-  }
-  const availableStaffRoleIds = config.ticketStaffRoleIds.filter(roleId => guild.roles.cache.has(roleId));
-  const missingStaffRoleIds = config.ticketStaffRoleIds.filter(roleId => !guild.roles.cache.has(roleId));
-  if (missingStaffRoleIds.length) console.warn(`رتب غير موجودة في هذا السيرفر: ${missingStaffRoleIds.join(', ')}`);
-  const item = ticketOptions[type] || ticketOptions.other;
-  const overwrites = [
-    { id: guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-    { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] },
-    { id: botMember.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.ReadMessageHistory] }
-  ];
-  for (const roleId of availableStaffRoleIds) overwrites.push({
-    id: roleId,
-    allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory],
-    deny: [PermissionsBitField.Flags.SendMessages]
-  });
-  const channel = await guild.channels.create({
-    name: `${config.ticketPrefix}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9\-_]/g, '').slice(0, 80) || `${config.ticketPrefix}-${interaction.user.id.slice(-4)}`,
-    type: ChannelType.GuildText,
-    parent: category?.id,
-    topic: `ticket-owner:${interaction.user.id} | type:${type}`,
-    permissionOverwrites: overwrites,
-    reason: `تذكرة جديدة بواسطة ${interaction.user.tag}`
-  });
-  const embed = new EmbedBuilder().setColor(item.color)
-    .setTitle(`${item.label}`)
-    .setDescription(`تم فتح التذكرة <@${interaction.user.id}>\n\nاكتب طلبك هنا وسيقوم فريق الدعم بالرد عليك.`)
-    .setFooter({ text: `${config.brandName} • فريق الدعم` });
-  embed.setImage(bannerUrl);
-  const controls = ticketControls();
-  await interaction.editReply({ content: `تم إنشاء التذكرة داخل الفئة المطلوبة: ${channel}` });
-  const mentionRoles = (await Promise.all(config.ticketMentionRoleIds.map(async roleId => (
-    guild.roles.fetch(roleId).catch(() => null)
-  )))).filter(Boolean);
-  const staffMentions = mentionRoles.map(role => `<@&${role.id}>`).join(' ');
-  const allowedRoleIds = mentionRoles.map(role => role.id);
-  await channel.send({
-    content: `<@${interaction.user.id}> ${staffMentions}`,
-    embeds: [embed],
-    components: [controls],
-    allowedMentions: { users: [interaction.user.id], roles: allowedRoleIds }
-  }).catch(error => console.error('Ticket message error:', error));
-}
-
-function ticketModal(type) {
-  return new ModalBuilder().setCustomId(`ticket_modal:${type}`).setTitle('تفاصيل التذكرة').addComponents(
-    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('subject').setLabel('العنوان').setPlaceholder('اكتب عنوان الإيميل أو الطلب').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(200)),
-    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('description').setLabel('الوصف').setPlaceholder('اشرح المشكلة أو الطلب بالتفصيل').setStyle(TextInputStyle.Paragraph).setRequired(true).setMaxLength(4000)),
-    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('link').setLabel('الرابط — اختياري').setPlaceholder('رابط صورة أو ملف أو صفحة').setStyle(TextInputStyle.Short).setRequired(false).setMaxLength(500))
-  );
-}
-
-function memberModal(action) {
-  return new ModalBuilder().setCustomId(`ticket_member:${action}`).setTitle(action === 'add' ? 'إضافة عضو للتذكرة' : 'إزالة عضو من التذكرة').addComponents(
-    new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('member').setLabel('منشن العضو أو ID').setPlaceholder('@العضو أو 123456789012345678').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(30))
-  );
-}
-
-const memberIdFromInput = value => value.match(/\d{17,20}/)?.[0] || null;
-
-function ratingMenu(kind, label, channelId) {
-  return new ActionRowBuilder().addComponents(
-    new StringSelectMenuBuilder().setCustomId(`survey:${kind}:${channelId}`).setPlaceholder(label).addOptions(
-      [1, 2, 3, 4, 5].map(score => ({ label: `${score}/5`, value: String(score), description: score === 5 ? 'ممتاز' : score === 1 ? 'يحتاج إلى تحسين' : 'تقييم الخدمة' }))
-    )
-  );
-}
-
-function surveyEmbed(state) {
-  const average = ((state.admin + state.service + state.speed) / 3).toFixed(2);
-  const stars = score => `${'⭐'.repeat(score)}${'☆'.repeat(5 - score)}  **${score}/5**`;
-  const embed = new EmbedBuilder().setColor(0xf1c40f)
-    .setAuthor({ name: `${config.brandName} • نظام التقييم`, iconURL: 'https://cdn.discordapp.com/embed/avatars/0.png' })
-    .setTitle('🏆 تقييم التذكرة')
-    .setDescription([
-      '**تم استلام التقييم بنجاح**',
-      'شكرًا لصاحب التذكرة على مشاركته رأيه. هذه النتيجة توثّق جودة الخدمة المقدمة.',
-      '',
-      `👤 **صاحب التذكرة:** <@${state.ownerId}>`,
-      `🛡️ **الإداري:** ${state.staffMention}`
-    ].join('\n'))
-    .addFields(
-      { name: '👨‍💼 تقييم الإداري', value: stars(state.admin), inline: false },
-      { name: '💰 تقييم سعر الخدمة', value: stars(state.service), inline: false },
-      { name: '⚡ تقييم سرعة التسليم', value: stars(state.speed), inline: false },
-      { name: '📊 المتوسط النهائي', value: `## ⭐ ${average} / 5\n${Number(average) >= 4 ? '🌟 تقييم ممتاز، شكرًا لثقتكم!' : 'شكرًا لملاحظاتكم، سنعمل على تحسين التجربة.'}`, inline: false }
-    )
-    .setFooter({ text: `${config.brandName} • تقييم موثّق من صاحب التذكرة` })
-    .setTimestamp();
-  if (state.staffAvatar) embed.setThumbnail(state.staffAvatar);
-  embed.setImage(bannerUrl);
-  return embed;
-}
-
-async function showSurvey(message) {
-  const channelId = message.channel.id;
-  const ownerId = ticketOf(message.channel);
-  const state = { ownerId, staffId: message.author.id, staffMention: `${message.author}`, staffAvatar: message.author.displayAvatarURL({ size: 128 }), admin: null, service: null, speed: null };
-  surveyStates.set(channelId, state);
-  const surveyMessage = await message.channel.send({
-    content: `<@${ownerId}>`,
-    embeds: [new EmbedBuilder().setColor(config.brandColor).setTitle('📝 نموذج تقييم').setDescription('يرجى تقييم تجربتك قبل إغلاق التذكرة.\n\nالتقييم متاح لصاحب التذكرة فقط.')],
-    components: [ratingMenu('admin', 'تقييم الإداري', channelId), ratingMenu('service', 'تقييم سعر الخدمة', channelId), ratingMenu('speed', 'تقييم سرعة التسليم', channelId)]
-  }).catch(error => {
-    console.error('Survey form message error:', error);
-    return null;
-  });
-  if (surveyMessage) state.surveyMessage = surveyMessage;
-}
-
-async function transcript(channel) {
-  const messages = await channel.messages.fetch({ limit: 100 });
-  const rows = [...messages.values()].reverse().map(message => {
-    const avatar = message.author.displayAvatarURL({ extension: 'png', size: 64 });
-    const content = safe(message.content || '').replace(/\n/g, '<br>');
-    const embeds = message.embeds.map(embed => `<div class="discord-embed"><strong>${safe(embed.title || 'رسالة مضمّنة')}</strong>${embed.description ? `<p>${safe(embed.description).replace(/\n/g, '<br>')}</p>` : ''}</div>`).join('');
-    const attachments = [...message.attachments.values()].map(file => `<div class="attachment">📎 ${safe(file.name)}</div>`).join('');
-    const body = content || embeds || attachments || '<span class="muted">[رسالة بدون نص]</span>';
-    return `<article class="message"><img class="avatar" src="${avatar}" alt=""><div class="message-body"><div class="meta"><strong>${safe(message.member?.displayName || message.author.username)}</strong><span class="bot">${message.author.bot ? 'BOT' : ''}</span><time>${new Date(message.createdTimestamp).toLocaleString('ar')}</time></div><div class="content">${body}${embeds && content ? embeds : ''}${attachments && (content || embeds) ? attachments : ''}</div></div></article>`;
-  }).join('\n');
-  const html = `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>#${safe(channel.name)}</title><style>
-  :root{color-scheme:dark;font-family:Arial,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:#313338;color:#dbdee1;direction:rtl}.app{max-width:980px;margin:0 auto;min-height:100vh;background:#313338}.channel-header{height:76px;padding:14px 24px;border-bottom:1px solid #1f2023;background:#2b2d31;display:flex;align-items:center;gap:12px}.hash{font-size:30px;color:#949ba4}.channel-header h1{font-size:20px;margin:0;color:#f2f3f5}.channel-header p{margin:4px 0 0;color:#949ba4;font-size:13px}.chat{padding:24px 20px 44px}.day{display:flex;align-items:center;gap:12px;color:#949ba4;font-size:12px;margin:8px 0 24px}.day:before,.day:after{content:"";height:1px;background:#4e5058;flex:1}.message{display:flex;gap:14px;direction:rtl;padding:8px 10px;margin:2px 0;border-radius:6px}.message:hover{background:#2e3035}.avatar{width:42px;height:42px;border-radius:50%;object-fit:cover;flex:none}.message-body{min-width:0;flex:1}.meta{display:flex;align-items:center;gap:8px;direction:rtl}.meta strong{font-size:15px;color:#f2f3f5}.meta time{font-size:11px;color:#949ba4;font-weight:normal}.bot{font-size:10px;background:#5865f2;color:white;border-radius:3px;padding:2px 4px}.content{font-size:15px;line-height:1.65;margin-top:3px;white-space:normal;overflow-wrap:anywhere}.muted{color:#949ba4}.discord-embed{border-right:4px solid #5865f2;background:#2b2d31;border-radius:4px;padding:12px 14px;margin-top:8px;max-width:620px}.discord-embed strong{color:#f2f3f5}.discord-embed p{margin:6px 0;color:#dbdee1}.attachment{display:inline-block;margin-top:8px;background:#1e1f22;border:1px solid #4e5058;border-radius:4px;padding:8px 12px;color:#00a8fc}.footer{padding:18px 24px;color:#949ba4;border-top:1px solid #1f2023;font-size:12px}@media(max-width:600px){.chat{padding:16px 10px}.channel-header{padding:12px 16px}.message{gap:10px}.avatar{width:36px;height:36px}.content{font-size:14px}}
-  </style></head><body><main class="app"><header class="channel-header"><span class="hash">#</span><div><h1>${safe(channel.name)}</h1><p>بداية قناة التذكرة • سجل المحادثة الكامل</p></div></header><section class="chat"><div class="day">${new Date(channel.createdTimestamp || Date.now()).toLocaleDateString('ar')}</div>${rows}</section><footer class="footer">تم تصدير ${messages.size} رسالة من #${safe(channel.name)} • ${config.brandName}</footer></main></body></html>`;
-  const file = path.join(__dirname, '..', 'transcripts', `${channel.id}.html`);
-  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, html);
-  return file;
-}
-
-async function closeTicket(interaction, deleteAfter = false) {
-  if (!ticketOf(interaction.channel)) return interaction.reply({ content: 'هذا الأمر يعمل داخل قناة تذكرة فقط.', ephemeral: true });
-  const ownerId = ticketOf(interaction.channel);
-  const claimedStaffId = claimedStaffOf(interaction.channel);
-  if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'هذه العملية متاحة للرتب المحددة فقط.', ephemeral: true });
-  if (claimedStaffId && interaction.user.id !== claimedStaffId) return interaction.reply({ content: 'فقط الإداري الذي استلم التذكرة يستطيع إغلاقها أو حذفها.', ephemeral: true });
-  await interaction.deferReply({ ephemeral: true });
-  if (markPointsAwarded(interaction.channel)) awardAdminPoints(interaction.user.id);
-  const file = await transcript(interaction.channel);
-  let downloadSent = false;
-  if (deleteAfter) {
-    const owner = await interaction.client.users.fetch(ownerId).catch(() => null);
-    const transcriptEmbed = new EmbedBuilder()
-      .setColor(config.brandColor)
-      .setTitle('📄 سجل التذكرة')
-      .setDescription('تم إغلاق تذكرتك. أرفقنا لك نسخة كاملة قابلة للتحميل والفتح في المتصفح.')
-      .addFields(
-        { name: '🎫 التذكرة', value: `#${interaction.channel.name}`, inline: true },
-        { name: '👤 صاحب التذكرة', value: `<@${ownerId}>`, inline: true },
-        { name: '🛡️ أغلقها', value: `${interaction.user}`, inline: true },
-        { name: '🕒 وقت الإغلاق', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: false }
-      )
-      .setFooter({ text: `${config.brandName} • احتفظ بالنسخة للرجوع إليها` })
-      .setTimestamp();
-    if (owner) transcriptEmbed.setThumbnail(owner.displayAvatarURL({ size: 128 }));
-    if (owner) {
-      downloadSent = Boolean(await owner.send({
-        embeds: [transcriptEmbed],
-        files: [new AttachmentBuilder(file, { name: `${interaction.channel.name}-transcript.html` })]
-      }).then(() => true).catch(() => false));
-    }
-  }
-  const result = deleteAfter
-    ? (downloadSent ? 'تم إرسال نسخة كاملة من التذكرة إلى الخاص، وسيتم حذف القناة.' : 'تعذر إرسال النسخة إلى الخاص لأن الرسائل الخاصة مغلقة، وتم حفظ السجل محليًا.')
-    : 'تم إغلاق التذكرة وحفظ السجل محليًا.';
-  await interaction.editReply({ content: result });
-  if (config.transcriptChannelId) {
-    const log = await interaction.guild.channels.fetch(config.transcriptChannelId).catch(() => null);
-    if (log?.isTextBased()) await log.send({
-      embeds: [new EmbedBuilder()
-        .setColor(config.brandColor)
-        .setTitle('📄 تم إغلاق تذكرة')
-        .setDescription('تم حفظ نسخة السجل محليًا وإرسالها إلى صاحب التذكرة عبر الخاص عند نجاح الإرسال.')
-        .addFields(
-          { name: '🎫 التذكرة', value: `#${interaction.channel.name}`, inline: true },
-          { name: '👤 صاحب التذكرة', value: `<@${ownerId}>`, inline: true },
-          { name: '🛡️ أغلقها', value: `${interaction.user}`, inline: true }
-        )
-        .setFooter({ text: config.brandName })
-        .setTimestamp()]
+function key(guildId, name) { return `${guildId}:${name}`; }
+function reply(ctx, payload) {
+  if (ctx.isChatInputCommand?.()) {
+    return ctx.reply(payload).then(() => {
+      setTimeout(() => ctx.deleteReply().catch(() => {}), 5000);
     });
   }
-  if (deleteAfter) {
-    const botPermissions = interaction.channel.permissionsFor(interaction.guild.members.me);
-    if (!botPermissions?.has(PermissionsBitField.Flags.ManageChannels)) {
-      console.error('Cannot delete ticket: bot is missing Manage Channels.');
-      return interaction.editReply({ content: 'تم حفظ النسخة، لكن لا أملك صلاحية Manage Channels لحذف القناة.' });
-    }
-    await interaction.channel.delete(`حذف التذكرة بواسطة ${interaction.user.tag}`).catch(error => {
-      console.error('Ticket deletion error:', error);
+  const message = typeof payload === 'string'
+    ? { content: payload, allowedMentions: { repliedUser: false } }
+    : payload;
+  const sent = ctx.reply(message);
+  setTimeout(() => {
+    sent.then(m => m.delete().catch(() => {})).catch(() => {});
+  }, 5000);
+  return sent;
+}
+function guildOf(ctx) { return ctx.guild; }
+function memberOf(ctx) { return ctx.isChatInputCommand?.() ? (ctx.options.getMember('user') || ctx.guild?.members.cache.get(ctx.options.getUser('user')?.id)) : ctx.mentions.members.first(); }
+function userOf(ctx) { return ctx.isChatInputCommand?.() ? (ctx.options.getUser('user') || ctx.user) : (ctx.mentions.users.first() || ctx.author); }
+function textOf(ctx, args, name) {
+  if (ctx.isChatInputCommand?.()) return ctx.options.getString(name) || '';
+  if (!Array.isArray(args)) return '';
+  return args.join(' ').trim();
+}
+function numberOf(ctx, args, name, fallback) { return ctx.isChatInputCommand?.() ? (ctx.options.getInteger(name) || fallback) : (Number(args[0]) || fallback); }
+function parseCommand(rawContent) {
+  const content = String(rawContent || '').trim();
+  if (!content) return null;
+  const isPrefixed = content.startsWith(prefix);
+  const candidate = (isPrefixed ? content.slice(prefix.length) : content).trim();
+  if (!candidate) return null;
+  const parts = candidate.split(/\s+/);
+  const raw = parts.shift()?.toLowerCase();
+  const name = aliases[raw] || raw;
+  if (!name || !defs.some(([command]) => command === name)) return null;
+  return { name, args: parts };
+}
+function parseCreditAmount(value) {
+  const normalized = String(value ?? '').trim().toLowerCase().replace(/[,\s]/g, '');
+  const match = normalized.match(/^(\d+(?:\.\d+)?)(k|m|b)?$/);
+  if (!match) return null;
+  const multiplier = { k: 1e3, m: 1e6, b: 1e9 }[match[2] || ''] || 1;
+  const amount = Number(match[1]) * multiplier;
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+const embedColors = {
+  red: 0xed4245, green: 0x57f287, blue: 0x3498db, yellow: 0xfee75c,
+  orange: 0xe67e22, purple: 0x9b59b6, pink: 0xeb459e, black: 0x000000,
+  white: 0xffffff, cyan: 0x00ffff, gold: 0xffd700, gray: 0x95a5a6,
+  احمر: 0xed4245, اخضر: 0x57f287, ازرق: 0x3498db, اصفر: 0xfee75c,
+  برتقالي: 0xe67e22, بنفسجي: 0x9b59b6, وردي: 0xeb459e, ابيض: 0xffffff,
+  اسود: 0x000000
+};
+function parseEmbedColor(value) {
+  const input = String(value || '').trim().toLowerCase();
+  if (!input) return COLOR;
+  if (embedColors[input] !== undefined) return embedColors[input];
+  const hex = input.replace(/^#/, '');
+  if (/^[0-9a-f]{6}$/i.test(hex)) return Number.parseInt(hex, 16);
+  if (/^[0-9a-f]{3}$/i.test(hex)) return Number.parseInt(hex.split('').map(char => char + char).join(''), 16);
+  return null;
+}
+function mention(member) { return member?.toString?.() || `<@${member?.id}>`; }
+function arabicNumber(value) { return Number(value).toLocaleString('ar-EG'); }
+function prettyDuration(ms) {
+  const total = Math.max(1, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60), seconds = total % 60;
+  if (minutes) return `${arabicNumber(minutes)} ${minutes === 1 ? 'دقيقة' : 'دقائق'}${seconds ? ` و${arabicNumber(seconds)} ثانية` : ''}`;
+  return `${arabicNumber(seconds)} ${seconds === 1 ? 'ثانية' : 'ثواني'}`;
+}
+function parseDuration(value = '10m') {
+  const match = String(value).toLowerCase().match(/^(\d+(?:\.\d+)?)(s|m|h|d|ث|د|س|ي)?$/);
+  if (!match) return 10 * 60 * 1000;
+  const multiplier = { s: 1000, ث: 1000, m: 60000, د: 60000, h: 3600000, س: 3600000, d: 86400000, ي: 86400000 }[match[2] || 'm'];
+  return Math.min(Math.max(Number(match[1]) * multiplier, 5000), 28 * 86400000);
+}
+function card(title, description, color = COLOR) { return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description).setFooter({ text: 'نظام الإدارة العربي • تم التنفيذ بنجاح' }).setTimestamp(); }
+function serverEmoji(guild, name, fallback = '') {
+  return guild?.emojis.cache.find(emoji => emoji.name?.toLowerCase() === name.toLowerCase())?.toString() || fallback;
+}
+function actionMessage(guild, text) {
+  const fever = serverEmoji(guild, 'FEVER', '');
+  const vxy = serverEmoji(guild, 'Vxy', '');
+  return `${fever} ${text} ${vxy}`.trim();
+}
+function channelResponse(ctx, payload) {
+  return ctx.isChatInputCommand?.() ? ctx.reply(payload) : ctx.channel.send(payload);
+}
+function settingKey(guildIdValue, name) { return key(guildIdValue, name); }
+function getGuildSetting(guildIdValue, settingName, fallback = null) {
+  const value = store.read().settings[settingKey(guildIdValue, settingName)];
+  return value ?? fallback;
+}
+
+async function execute(name, ctx, args = []) {
+  const guild = guildOf(ctx);
+  if (!guild && !['avatar', 'banner', 'help'].includes(name)) return reply(ctx, 'هذا الأمر يعمل داخل السيرفر فقط.');
+  if (modCommands.has(name) && !isMod(ctx.member)) return reply(ctx, { embeds: [card(`${EMOJIS.error} تعذّر تنفيذ الأمر`, 'تحتاج إلى صلاحية إدارة الرسائل.', 0xed4245)] });
+  if (name === 'help') return reply(ctx, `الأوامر المختصرة:\n${prefix}م / clear → مسح الرسائل\n${prefix}ب / ban → حظر عضو\n${prefix}ط / kick → طرد عضو\n${prefix}ك / timeout → كتم عضو\n${prefix}ق / lock → قفل القناة\n${prefix}فتح / unlock → فتح القناة\n${prefix}قول / say → يكتب رسالة باسم البوت\n${prefix}اقتراحات / suggestion-mode → تفعيل اقتراحات\n${prefix}ضريبة / tax → حساب الضريبة 5%\n${prefix}مساعدة / help → قائمة الأوامر\n\nأوامر الـ Slash تعمل أيضًا بنفس الوظائف.`);
+  if (name === 'gend') name = 'gstart';
+  if (name === 'ping') return reply(ctx, { embeds: [card('🏓 Ping', `زمن استجابة البوت: **${client.ws.ping}ms**`, 0x57f287)] });
+  if (name === 'server') name = 'serverinfo';
+  if (name === 'mute') name = 'timeout';
+  if (name === 'hide') { await ctx.channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false }); return reply(ctx, { embeds: [card(`${EMOJIS.lock} تم إخفاء القناة`, 'تم إخفاء القناة عن الأعضاء بنجاح.')] }); }
+  if (name === 'roles') return reply(ctx, { embeds: [card('🎭 رتب السيرفر', guild.roles.cache.filter(role => role.name !== '@everyone').map(role => `${role} • ${role.name}`).slice(0, 50).join('\n') || 'لا توجد رتب إضافية.')] });
+  if (['anti-ban', 'anti-bots', 'anti-delete-roles', 'anti-delete-rooms', 'dm-mode', 'feedback-mode', 'line-mode'].includes(name)) {
+    const enabled = ctx.isChatInputCommand?.() ? ctx.options.getBoolean('enabled') : ['on', 'true', 'تشغيل'].includes(String(args[0]).toLowerCase());
+    store.update(data => { data.settings[key(guild.id, name)] = enabled; });
+    return reply(ctx, { embeds: [card(`${enabled ? '✅ تم التفعيل' : '⛔ تم التعطيل'}`, `تم ${enabled ? 'تفعيل' : 'تعطيل'} **${name}** في هذا السيرفر.`, 0x57f287)] });
+  }
+  if (name === 'add-autoline-channel' || name === 'add-nadeko-room') {
+    const channel = ctx.isChatInputCommand?.() ? ctx.options.getChannel('channel') : guild.channels.cache.get(args[0]);
+    if (!channel) return reply(ctx, 'حدد القناة المطلوبة.');
+    store.update(data => { data.settings[key(guild.id, name)] = channel.id; });
+    return reply(ctx, `✅ تم ربط القناة ${channel} بالأمر ${name}.`);
+  }
+  if (name === 'close' || name === 'close-apply') {
+    await ctx.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: false });
+    return reply(ctx, { embeds: [card('🔒 تم إغلاق القناة', 'تم منع إرسال الرسائل في هذه القناة.', 0x57f287)] });
+  }
+  if (name === 'copy-emoji') {
+    const value = ctx.isChatInputCommand?.() ? ctx.options.getString('emoji') : args[0];
+    const match = String(value || '').match(/<(a?):[\w~]+:(\d+)>/);
+    if (!match) return reply(ctx, 'أرسل منشن إيموجي صالح مثل <:emoji:123456789>.');
+    const extension = match[1] ? 'gif' : 'png';
+    return reply(ctx, `https://cdn.discordapp.com/emojis/${match[2]}.${extension}?size=1024&quality=lossless`);
+  }
+  if (name === 'add-button' || name === 'add-info-button' || name === 'add-ticket-button') {
+    const text = ctx.isChatInputCommand?.() ? (ctx.options.getString('text') || 'اضغط هنا') : args.join(' ') || 'اضغط هنا';
+    const customId = name === 'add-ticket-button' ? 'ticket:create' : `${name}:${Buffer.from(text).toString('base64url').slice(0, 70)}`;
+    const button = new ButtonBuilder().setCustomId(customId).setLabel(text.slice(0, 80)).setStyle(name === 'add-ticket-button' ? ButtonStyle.Success : ButtonStyle.Primary);
+    return channelResponse(ctx, { components: [new ActionRowBuilder().addComponents(button)] });
+  }
+  if (name === 'new-panel' || name === 'new-apply') {
+    const button = new ButtonBuilder().setCustomId(name === 'new-apply' ? 'apply:create' : 'ticket:create').setLabel(name === 'new-apply' ? 'تقديم' : 'فتح تذكرة').setStyle(ButtonStyle.Primary);
+    return channelResponse(ctx, { embeds: [card(name === 'new-apply' ? '📨 لوحة التقديم' : '🎫 اللوحة التفاعلية', 'استخدم الزر الموجود بالأسفل.')], components: [new ActionRowBuilder().addComponents(button)] });
+  }
+  if (name === 'rename') { const newName = ctx.isChatInputCommand?.() ? ctx.options.getString('name') : args.join('-'); if (!newName) return reply(ctx, 'حدد الاسم الجديد للقناة.'); await ctx.channel.setName(newName); return reply(ctx, { embeds: [card('✎ تم تغيير اسم القناة', `الاسم الجديد: **${newName}**`, 0x57f287)] }); }
+  if (name === 'nickname') { const member = memberOf(ctx); const newName = ctx.isChatInputCommand?.() ? ctx.options.getString('name') : args.slice(1).join(' '); if (!member) return reply(ctx, 'حدد العضو.'); await member.setNickname(newName || null); return reply(ctx, { embeds: [card('✎ تم تحديث اللقب', `${mention(member)} ${newName ? `لقبه الآن **${newName}**.` : 'تمت إزالة لقبه.'}`, 0x57f287)] }); }
+  if (name === 'role') { const member = memberOf(ctx); const role = ctx.isChatInputCommand?.() ? ctx.options.getRole('role') : guild.roles.cache.find(item => item.name === args[1] || item.id === args[1]); const action = ctx.isChatInputCommand?.() ? (ctx.options.getString('action') || 'add') : (args[2] || 'add'); if (!member || !role) return reply(ctx, 'حدد العضو والرتبة.'); if (action === 'remove') await member.roles.remove(role); else await member.roles.add(role); return reply(ctx, { embeds: [card('🎭 تم تحديث الرتبة', `${action === 'remove' ? 'تمت إزالة' : 'تمت إضافة'} رتبة **${role.name}** ${action === 'remove' ? 'من' : 'إلى'} ${mention(member)}.`, 0x57f287)] }); }
+  if (name === 'logs-info') return reply(ctx, { embeds: [card('📋 حالة السجلات', 'نظام السجلات الأساسي جاهز. يمكن ربط قناة السجلات من إعدادات السيرفر.', 0x57f287)] });
+  if (name === 'protection-status') { const settings = store.read().settings; const active = Object.keys(settings).filter(item => item.startsWith(`${guild.id}:`)); return reply(ctx, { embeds: [card(`${EMOJIS.mod} حالة الحماية`, active.length ? active.map(item => `• ${item.split(':').slice(1).join(':')}`).join('\n') : 'لا توجد حماية مفعلة حاليًا.')] }); }
+  if (name === 'line-mode' || name === 'set-autoline-line' || name === 'set-feedback-line' || name === 'set-feedback-room' || name === 'set-message') { const value = ctx.isChatInputCommand?.() ? (ctx.options.getBoolean('enabled') ?? ctx.options.getString('text') ?? ctx.options.getChannel('channel')?.id) : args.join(' '); store.update(data => { data.settings[key(guild.id, name)] = value; }); return reply(ctx, { embeds: [card(`${EMOJIS.ok} تم حفظ الإعداد`, 'تم تحديث إعداد هذا السيرفر بنجاح.', 0x57f287)] }); }
+  if (name === 'remove-all-tokens' || name === 'remove-token') { store.update(data => { data.settings[key(guild.id, name)] = true; }); return reply(ctx, { embeds: [card(`${EMOJIS.ok} تم تنفيذ الحذف`, name === 'remove-all-tokens' ? 'تم حذف جميع التوكنات المحفوظة.' : 'تم حذف التوكن المحدد.', 0x57f287)] }); }
+  if (name === 'remove-autoline-channel' || name === 'remove-nadeko-room') { store.update(data => { delete data.settings[key(guild.id, name.replace('remove-', 'add-'))]; }); return reply(ctx, { embeds: [card(`${EMOJIS.ok} تم حذف الإعداد`, 'تمت إزالة إعداد القناة بنجاح.', 0x57f287)] }); }
+  if (name === 'tax') {
+    if (ctx.channel?.id !== TAX_CHANNEL_ID) return reply(ctx, `استخدم أمر الضريبة في روم <#${TAX_CHANNEL_ID}> فقط.`);
+    const input = ctx.isChatInputCommand?.() ? ctx.options.getString('amount') : args[0];
+    const netAmount = parseCreditAmount(input);
+    if (!netAmount) return reply(ctx, { content: 'صيغة غير صحيحة', allowedMentions: { repliedUser: false } });
+    const buyerAmount = Math.ceil(netAmount / (1 - TAX_RATE));
+    return reply(ctx, { content: `${buyerAmount.toLocaleString('en-US')}`, allowedMentions: { repliedUser: false } });
+  }
+  if (name === 'suggestion-mode') {
+    const channelSetting = getGuildSetting(guild.id, 'set-suggestions-room');
+    store.update(data => { data.settings[key(guild.id, name)] = true; });
+    return reply(ctx, {
+      embeds: [card('💡 وضع الاقتراحات', channelSetting ? `تم تفعيل وضع الاقتراحات في هذه القناة.\nسيتم إرسال كل اقتراح إلى <@${ownerId}> في الخاص.` : 'تم تفعيل وضع الاقتراحات. الآن حدد قناة الاقتراحات باستخدام الأمر set-suggestions-room أو /set-suggestions-room.', 0x57f287)]
     });
+  }
+  if (name.startsWith('setup-')) { store.update(data => { data.settings[key(guild.id, name)] = true; }); return reply(ctx, { embeds: [card(`${EMOJIS.ok} تم الإعداد`, `تم تفعيل إعداد **${name.replace('setup-', '')}** بنجاح.`, 0x57f287)] }); }
+  if (name.startsWith('set-')) { const setting = ctx.isChatInputCommand?.() ? (ctx.options.getString('text') || ctx.options.getString('shortcut') || ctx.options.getString('command') || ctx.options.getChannel('channel')?.id) : args.join(' '); store.update(data => { data.settings[key(guild.id, name)] = setting; }); if (name === 'set-suggestions-room') { const room = ctx.isChatInputCommand?.() ? ctx.options.getChannel('channel') : guild.channels.cache.get(args[0]); const roomId = room?.id || setting; return reply(ctx, { embeds: [card('💡 تم تحديد قناة الاقتراحات', `تم ربط اقتراحات السيرفر بالقناة <#${roomId}>، وسيتم إرسال كل اقتراح إلى <@${ownerId}> في الخاص.`, 0x57f287)] }); } return reply(ctx, { embeds: [card(`${EMOJIS.ok} تم حفظ الإعداد`, 'تم تحديث إعداد السيرفر بنجاح.', 0x57f287)] }); }
+  if (name === 'send' || name === 'say') {
+    let text = textOf(ctx, args, 'text');
+    if (!text && !ctx.isChatInputCommand?.()) {
+      const raw = ctx.content || '';
+      text = raw.replace(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i'), '').trim();
+      if (!text) text = raw.replace(/^(say|send|قول|ارسال)\s*[:،\s]*/i, '').trim();
+    }
+    if (!text) return reply(ctx, 'اكتب نص الرسالة.');
+    if (!ctx.isChatInputCommand?.()) await ctx.delete().catch(() => {});
+    return channelResponse(ctx, { content: text });
+  }
+  if (name === 'send-broadcast-panel') { const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('broadcast-confirm').setLabel('تأكيد الإرسال').setStyle(ButtonStyle.Danger)); return channelResponse(ctx, { embeds: [card('📢 لوحة البث', 'اضغط الزر لتأكيد إرسال البث.')], components: [row] }); }
+  if (name === 'avatar' || name === 'banner') { const user = userOf(ctx); const fetched = await client.users.fetch(user.id, { force: true }); const url = name === 'banner' ? fetched.bannerURL({ size: 1024, extension: 'png' }) : fetched.displayAvatarURL({ size: 1024, extension: 'png' }); return reply(ctx, url ? { embeds: [new EmbedBuilder().setTitle(name === 'banner' ? `بانر ${user.username}` : `صورة ${user.username}`).setImage(url)] } : 'لا يوجد بانر لهذا العضو.'); }
+  if (name === 'clear') { const amount = Math.min(Math.max(numberOf(ctx, args, 'amount', 10), 1), 100); const deleteAmount = ctx.isChatInputCommand?.() ? amount : amount + 1; const messages = await ctx.channel.bulkDelete(deleteAmount, true); const deletedCount = ctx.isChatInputCommand?.() ? messages.size : Math.max(0, messages.size - 1); const payload = { embeds: [card(`${EMOJIS.trash} تم تنظيف المحادثة`, `تم حذف **${arabicNumber(deletedCount)}** رسالة بنجاح.`, 0x57f287)] }; if (ctx.isChatInputCommand?.()) return ctx.reply({ ...payload, ephemeral: true }); const sent = await ctx.channel.send(payload); setTimeout(() => sent.delete().catch(() => {}), 6000); return sent; }
+  if (name === 'delete') return ctx.isChatInputCommand?.() ? reply(ctx, 'استخدم أمر المسح لحذف الرسائل؛ لا يمكن حذف رسالة Slash.') : ctx.delete().catch(() => {});
+  if (name === 'ban' || name === 'kick') { const member = memberOf(ctx); if (!member) return reply(ctx, { embeds: [card(`${EMOJIS.error} طريقة الاستخدام`, 'حدد العضو باستخدام منشن أو أمر Slash.', 0xed4245)] }); if (name === 'ban' && !member.bannable) return reply(ctx, { embeds: [card(`${EMOJIS.error} تعذّر الحظر`, 'رتبة العضو أعلى من رتبة البوت.', 0xed4245)] }); if (name === 'kick' && !member.kickable) return reply(ctx, { embeds: [card(`${EMOJIS.error} تعذّر الطرد`, 'رتبة العضو أعلى من رتبة البوت.', 0xed4245)] }); const reason = ctx.isChatInputCommand?.() ? ctx.options.getString('reason') : args.slice(1).join(' '); await (name === 'ban' ? member.ban({ reason: reason || 'لم يتم ذكر سبب' }) : member.kick(reason || 'لم يتم ذكر سبب')); return reply(ctx, { embeds: [card(name === 'ban' ? `${EMOJIS.ban} تم الحظر بنجاح` : `${EMOJIS.kick} تم الطرد بنجاح`, `${name === 'ban' ? 'تم حظر' : 'تم طرد'} العضو ${mention(member)} من السيرفر.\n\n**السبب:** ${reason || 'لم يتم ذكر سبب'}`, 0xed4245)] }); }
+  if (name === 'timeout' || name === 'untimeout') { const member = memberOf(ctx); if (!member) return reply(ctx, { embeds: [card(`${EMOJIS.error} طريقة الاستخدام`, 'حدد العضو باستخدام منشن أو أمر Slash.', 0xed4245)] }); if (!member.moderatable) return reply(ctx, { embeds: [card(`${EMOJIS.error} تعذّر تعديل الإسكات`, 'رتبة العضو أعلى من رتبة البوت.', 0xed4245)] }); const duration = ctx.isChatInputCommand?.() ? Math.min(ctx.options.getInteger('minutes') || 10, 40320) * 60000 : parseDuration(args[1] || '10m'); if (name === 'untimeout') { await member.timeout(null, 'تم فك الإسكات بواسطة البوت'); return reply(ctx, { embeds: [card(`${EMOJIS.ok} تم فك الإسكات`, `تم فك الإسكات عن ${mention(member)} بنجاح.`, 0x57f287)] }); } await member.timeout(duration, 'تم الإسكات بواسطة البوت'); return reply(ctx, { embeds: [card(`${EMOJIS.time} تم إسكات العضو`, `تم إسكات العضو ${mention(member)} لمدة **${prettyDuration(duration)}**.`, 0xfee75c)] }); }
+  if (name === 'lock' || name === 'unlock') { await ctx.channel.permissionOverwrites.edit(guild.roles.everyone, { SendMessages: name === 'unlock' }); return reply(ctx, { embeds: [card(name === 'lock' ? `${EMOJIS.lock} تم قفل القناة` : `${EMOJIS.unlock} تم فتح القناة`, name === 'lock' ? 'تم منع إرسال الرسائل في هذه القناة.' : 'تم السماح بإرسال الرسائل في هذه القناة.', name === 'lock' ? COLOR : 0x57f287)] }); }
+  if (name === 'add-user' || name === 'remove-user') { const member = memberOf(ctx); if (!member) return reply(ctx, 'حدد العضو باستخدام منشن أو أمر Slash.'); const canWrite = name === 'add-user'; await ctx.channel.permissionOverwrites.edit(member, { ViewChannel: canWrite, ReadMessageHistory: canWrite, SendMessages: canWrite, SendMessagesInThreads: canWrite, AttachFiles: canWrite, EmbedLinks: canWrite }); return reply(ctx, canWrite ? `✅ تمت إضافة ${member} ويمكنه الكتابة في هذه القناة.` : `✅ تمت إزالة ${member}.`); }
+  if (name === 'userinfo') { const member = memberOf(ctx) || ctx.member; return reply(ctx, { embeds: [new EmbedBuilder().setTitle(`معلومات ${member.user.tag}`).setThumbnail(member.user.displayAvatarURL()).addFields({ name: 'المعرف', value: member.id }, { name: 'انضمام', value: `<t:${Math.floor(member.joinedTimestamp / 1000)}:R>` })] }); }
+  if (name === 'serverinfo') return reply(ctx, { embeds: [new EmbedBuilder().setTitle(guild.name).addFields({ name: 'الأعضاء', value: String(guild.memberCount), inline: true }, { name: 'القنوات', value: String(guild.channels.cache.size), inline: true }, { name: 'المالك', value: `<@${guild.ownerId}>`, inline: true })] });
+  if (name === 'say') { const text = textOf(ctx, args, 'text'); if (!ctx.isChatInputCommand?.()) await ctx.delete().catch(() => {}); return channelResponse(ctx, { content: text }); }
+  if (name === 'embed') {
+    let text;
+    let colorInput;
+    if (ctx.isChatInputCommand?.()) {
+      text = ctx.options.getString('text') || '';
+      colorInput = ctx.options.getString('color') || '';
+    } else {
+      const possibleColor = parseEmbedColor(args[0]);
+      colorInput = possibleColor === null ? '' : args.shift();
+      text = args.join(' ').trim();
+    }
+    if (!text) return reply(ctx, 'اكتب نص الإيمبد.');
+    const color = parseEmbedColor(colorInput);
+    if (color === null) return reply(ctx, 'اللون غير صحيح. استخدم Hex مثل #ff0000 أو اسم لون.');
+    if (!ctx.isChatInputCommand?.()) await ctx.delete().catch(() => {});
+    return channelResponse(ctx, { embeds: [new EmbedBuilder().setColor(color).setDescription(text)] });
+  }
+  if (name === 'come') {
+    const member = memberOf(ctx);
+    if (!member) return reply(ctx, 'حدد الشخص الذي تريد استدعاؤه.');
+    const channelName = guild?.channels?.cache?.find(c => c.id === ctx.channelId)?.name || 'هذا الشات';
+    await member.send(`📣 تعال الآن إلى شات **${channelName}**، تم طلبك من قبل **${ctx.user || ctx.author}**.`).catch(() => {});
+    return reply(ctx, `✅ تم إرسال رسالة استدعاء إلى ${member}.`);
+  }
+  if (name === 'warn') {
+    const member = memberOf(ctx);
+    if (!member) return reply(ctx, 'حدد العضو.');
+    await member.send(`⚠️ تنبيه: تم تحذيرك من السيرفر، الرجاء الالتزام بالقوانين.`).catch(() => {});
+    return reply(ctx, `✅ تم إرسال تحذير إلى ${member}.`);
+  }
+  if (name === 'autoreply-add') { const trigger = ctx.isChatInputCommand?.() ? ctx.options.getString('trigger') : args[0]; const value = ctx.isChatInputCommand?.() ? ctx.options.getString('reply') : args.slice(1).join(' '); if (!trigger || !value) return reply(ctx, `استخدم: ${prefix}رد الكلمة الرد`); store.update(s => { s.autoreplies[key(guild.id, trigger.toLowerCase())] = value; }); return reply(ctx, '✅ تمت إضافة الرد التلقائي.'); }
+  if (name === 'autoreply-list') { const rows = Object.entries(store.read().autoreplies).filter(([k]) => k.startsWith(`${guild.id}:`)).map(([k, v]) => `• **${k.split(':').slice(1).join(':')}** ← ${v}`); return reply(ctx, rows.length ? rows.join('\n') : 'لا توجد ردود تلقائية.'); }
+  if (name === 'autoreply-remove') { const trigger = ctx.isChatInputCommand?.() ? ctx.options.getString('trigger') : args[0]; store.update(s => { delete s.autoreplies[key(guild.id, trigger.toLowerCase())]; }); return reply(ctx, '✅ تم حذف الرد إن كان موجودًا.'); }
+  if (name === 'gstart') { const seconds = Math.max(5, numberOf(ctx, args, 'seconds', 60)); const prize = ctx.isChatInputCommand?.() ? ctx.options.getString('prize') : args.slice(1).join(' ') || 'جائزة'; if (ctx.isChatInputCommand?.()) await ctx.deferReply(); const msg = await ctx.channel.send(`🎉 **سحب جديد!**\nالجائزة: **${prize}**\nتفاعل بـ 🎉 خلال ${seconds} ثانية للفوز.`); await msg.react('🎉'); if (ctx.isChatInputCommand?.()) await ctx.editReply(`✅ تم إنشاء السحب: ${msg.url}`); setTimeout(async () => { const fresh = await ctx.channel.messages.fetch(msg.id).catch(() => null); const users = fresh ? await fresh.reactions.cache.get('🎉')?.users.fetch() : null; const winner = users?.filter(u => !u.bot).random(); await ctx.channel.send(winner ? `🏆 الفائز هو ${winner}!` : 'لم يشارك أحد في السحب.'); }, seconds * 1000); }
+  if (name === 'greroll') {
+    const messageId = ctx.isChatInputCommand?.() ? ctx.options.getString('message') : args[0];
+    const giveaway = await ctx.channel.messages.fetch(messageId).catch(() => null);
+    const users = giveaway ? await giveaway.reactions.cache.get('🎉')?.users.fetch() : null;
+    const winner = users?.filter(user => !user.bot).random();
+    return reply(ctx, winner ? `🏆 الفائز الجديد هو ${winner}.` : 'لم يتم العثور على مشاركين في السحب.');
+  }
+}
+
+client.once('ready', async () => { const rest = new REST({ version: '10' }).setToken(token); const route = guildId ? Routes.applicationGuildCommands(clientId, guildId) : Routes.applicationCommands(clientId); await rest.put(route, { body: slashCommands }); console.log(`✅ Logged in as ${client.user.tag}; ${slashCommands.length} slash commands registered.`); });
+client.on('messageCreate', async message => {
+  if (message.author.bot) return;
+  const rawContent = message.content.trim();
+  const parsed = parseCommand(rawContent);
+
+  if (parsed) {
+    try {
+      await execute(parsed.name, message, parsed.args);
+    } catch (error) {
+      console.error(error);
+      reply(message, 'حدث خطأ. تحقق من صلاحيات البوت.').catch(() => {});
+    }
     return;
   }
-  await interaction.channel.permissionOverwrites.edit(ownerId, { SendMessages: false }).catch(error => {
-    console.error('Ticket close permission update error:', error);
-  });
-  await interaction.channel.setName(`closed-${interaction.channel.name.replace(/^closed-/, '')}`).catch(() => {});
-}
 
-client.once(Events.ClientReady, c => console.log(`✅ ${c.user.tag} متصل وجاهز.`));
-client.once(Events.ClientReady, c => {
-  if (!config.staffRoleId) console.warn('تنبيه: STAFF_ROLE_ID فارغ؛ الرؤية الكاملة للتذاكر مضمونة للإداريين بصلاحية Administrator فقط.');
-  if (config.ticketCategoryId) console.log(`📁 فئة التذاكر: ${config.ticketCategoryId}`);
-  if (config.ratingsChannelId) console.log(`⭐ روم التقييم: ${config.ratingsChannelId}`);
-});
-client.on(Events.InteractionCreate, async interaction => {
-  try {
-    if (interaction.isChatInputCommand()) {
-      if (['setup-ticket', 'zeropanel'].includes(interaction.commandName)) {
-        if (!isStaff(interaction.member)) return interaction.reply({ content: 'تحتاج صلاحية Manage Channels لنشر اللوحة.', ephemeral: true });
-        await interaction.deferReply({ ephemeral: true });
-        await sendPanel(interaction.channel);
-        return interaction.editReply({ content: 'تم نشر لوحة التذاكر.' });
-      }
-      if (interaction.commandName === 'close') return closeTicket(interaction);
-      if (interaction.commandName === 'rename') {
-        if (!isStaff(interaction.member)) return interaction.reply({ content: 'هذا الأمر لفريق الدعم فقط.', ephemeral: true });
-        if (!ticketOf(interaction.channel)) return interaction.reply({ content: 'هذه ليست قناة تذكرة.', ephemeral: true });
-        await interaction.channel.setName(`${config.ticketPrefix}-${interaction.options.getString('name').toLowerCase().replace(/[^a-z0-9\-_]/g, '').slice(0, 80)}`); return interaction.reply({ content: 'تم تغيير الاسم.', ephemeral: true });
-      }
-      if (['add', 'remove'].includes(interaction.commandName)) {
-        if (!isStaff(interaction.member) || !ticketOf(interaction.channel)) return interaction.reply({ content: 'هذا الأمر لفريق الدعم داخل التذكرة فقط.', ephemeral: true });
-        const user = interaction.options.getUser('user');
-        await interaction.channel.permissionOverwrites[interaction.commandName === 'add' ? 'create' : 'edit'](user.id, interaction.commandName === 'add' ? { ViewChannel: true, SendMessages: true, ReadMessageHistory: true } : { ViewChannel: false });
-        return interaction.reply({ content: interaction.commandName === 'add' ? `تمت إضافة ${user}.` : `تمت إزالة ${user}.`, ephemeral: true });
-      }
-    }
-    if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_type') {
-      if (interaction.values[0] === 'reset') return interaction.update({ components: [typeMenu()] });
-      return createTicket(interaction, interaction.values[0], '', '', '', interaction.user.id);
-    }
-    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('survey:')) {
-      const [, kind, channelId] = interaction.customId.split(':');
-      const state = surveyStates.get(channelId);
-      if (!state || interaction.channel.id !== channelId) return interaction.reply({ content: 'انتهى هذا النموذج.', ephemeral: true });
-      if (interaction.user.id !== state.ownerId) return interaction.reply({ content: 'التقييم متاح لصاحب التذكرة فقط.', ephemeral: true });
-      if (state[kind] !== null) return interaction.reply({ content: 'تم تسجيل هذا التقييم مسبقًا.', ephemeral: true });
-      state[kind] = Number(interaction.values[0]);
-      await interaction.reply({ content: surveyComplete(channelId) ? 'تم اكتمال التقييم بالكامل، يمكن للإدارة إنهاء التذكرة.' : 'تم حفظ تقييمك، أكمل بقية الأسئلة.', ephemeral: true });
-      if (surveyComplete(channelId)) await publishSurveyResult(interaction.channel, state, interaction.message);
+  if (message.guild) {
+    if (message.channel.id === FEEDBACK_CHANNEL_ID && message.content.trim()) {
+      const feedbackEmbed = new EmbedBuilder()
+        .setColor(0x8f1d2c)
+        .setAuthor({ name: message.author.tag, iconURL: message.author.displayAvatarURL({ size: 128 }) })
+        .setDescription(message.content.trim())
+        .setFooter({ text: 'Nexora Store • رأيك يهمنا' })
+        .setTimestamp();
+      await message.channel.send({ content: `شكراً لرأيك ${message.author} 🤍`, embeds: [feedbackEmbed], allowedMentions: { users: [message.author.id] } });
+      await message.delete().catch(() => {});
       return;
     }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_modal:')) {
-      const type = interaction.customId.split(':')[1];
-      return await createTicket(interaction, type, interaction.fields.getTextInputValue('subject'), interaction.fields.getTextInputValue('description'), interaction.fields.getTextInputValue('link'), interaction.user.id);
+
+    const auto = store.read().autoreplies[key(message.guild.id, message.content.toLowerCase())];
+    if (auto) await message.reply({ content: auto, allowedMentions: { parse: [], repliedUser: false } });
+
+    const suggestionsRoomId = getGuildSetting(message.guild.id, 'set-suggestions-room');
+    const suggestionModeEnabled = getGuildSetting(message.guild.id, 'suggestion-mode', false);
+    if (suggestionModeEnabled && suggestionsRoomId && message.channel.id === suggestionsRoomId) {
+      const suggestionText = message.content.trim();
+      if (suggestionText) {
+        const ownerUser = await client.users.fetch(ownerId).catch(() => null);
+        const embed = new EmbedBuilder()
+          .setColor(0x5865f2)
+          .setTitle('💡 اقتراح جديد')
+          .setDescription(suggestionText)
+          .addFields(
+            { name: 'المرسل', value: `<@${message.author.id}>`, inline: true },
+            { name: 'القناة', value: `<#${message.channel.id}>`, inline: true },
+            { name: 'التاريخ', value: `<t:${Math.floor(Date.now() / 1000)}:f>`, inline: true }
+          );
+        if (ownerUser) {
+          await ownerUser.send({ embeds: [embed] }).catch(() => {});
+        }
+        await message.reply({ content: '✅ تم إرسال اقتراحك بنجاح، وسيصل إلى المالك في الخاص.', allowedMentions: { repliedUser: false } }).catch(() => {});
+      }
     }
-    if (interaction.isModalSubmit() && interaction.customId.startsWith('ticket_member:')) {
-      if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'هذا الزر للرتب المحددة فقط.', ephemeral: true });
-      if (!ticketOf(interaction.channel)) return interaction.reply({ content: 'هذا الزر يعمل داخل التذكرة فقط.', ephemeral: true });
-      const action = interaction.customId.split(':')[1];
-      const memberId = memberIdFromInput(interaction.fields.getTextInputValue('member'));
-      if (!memberId) return interaction.reply({ content: 'أرسل منشن العضو أو ID صحيح.', ephemeral: true });
-      const member = await interaction.guild.members.fetch(memberId).catch(() => null);
-      if (!member) return interaction.reply({ content: 'لم أجد هذا العضو في السيرفر.', ephemeral: true });
-      await interaction.channel.permissionOverwrites.edit(member.id, action === 'add'
-        ? { ViewChannel: true, SendMessages: true, ReadMessageHistory: true }
-        : { ViewChannel: false });
-      return interaction.reply({ content: action === 'add' ? `تمت إضافة ${member} إلى التذكرة.` : `تمت إزالة ${member} من التذكرة.`, ephemeral: true });
-    }
+  }
+  if (message.guild && message.channel.id === TAX_CHANNEL_ID && parseCreditAmount(message.content)) {
+    try {
+      const amount = parseCreditAmount(message.content);
+      const buyerAmount = Math.ceil(amount / (1 - TAX_RATE));
+      await message.reply({ content: `${buyerAmount.toLocaleString('en-US')}`, allowedMentions: { repliedUser: false } });
+    } catch (error) { console.error(error); }
+    return;
+  }
+});
+client.on('interactionCreate', async interaction => {
+  try {
     if (interaction.isButton()) {
-      if (['ticket_add_member', 'ticket_remove_member'].includes(interaction.customId)) {
-        if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'هذا الزر للرتب المحددة فقط.', ephemeral: true });
-        return interaction.showModal(memberModal(interaction.customId === 'ticket_add_member' ? 'add' : 'remove'));
+      if (interaction.customId.startsWith('add-info-button:')) {
+        const encoded = interaction.customId.split(':')[1] || '';
+        const text = Buffer.from(encoded, 'base64url').toString('utf8');
+        return reply(interaction, text);
       }
-      if (interaction.customId === 'ticket_claim') {
-        if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'الاستلام متاح للرتب المحددة فقط.', ephemeral: true });
-        if (claimedStaffOf(interaction.channel)) return interaction.reply({ content: 'التذكرة مستلمة من إداري آخر.', ephemeral: true });
-        const topic = interaction.channel.topic || '';
-        const updatedTopic = topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, '').replace(/\s*\|\s*ticket-points-awarded/, '');
-        await interaction.channel.setTopic(`${updatedTopic} | ticket-claimed-by:${interaction.user.id}`);
-        await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
-          ViewChannel: true,
-          SendMessages: true,
-          ReadMessageHistory: true
+      if (interaction.customId.startsWith('add-button:')) return reply(interaction, '✅ تم الضغط على الزر.');
+      if (interaction.customId === 'ticket:create' || interaction.customId === 'apply:create') {
+        const channelName = `${interaction.customId === 'apply:create' ? 'apply' : 'ticket'}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 90);
+        const created = await interaction.guild.channels.create({
+          name: channelName,
+          type: 0,
+          permissionOverwrites: [
+            { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+            { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
+            { id: client.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] }
+          ]
         });
-        await interaction.message.edit({ components: [ticketControls(true)] });
-        await interaction.channel.send(`✅ تم استلام التذكرة بواسطة ${interaction.user}.`); return interaction.reply({ content: 'تم استلام التذكرة.', ephemeral: true });
+        return reply(interaction, `✅ تم إنشاء ${created}.`);
       }
-      if (interaction.customId === 'ticket_release') {
-        if (!isTicketStaff(interaction.member)) return interaction.reply({ content: 'ترك التذكرة متاح للرتب المحددة فقط.', ephemeral: true });
-        if (claimedStaffOf(interaction.channel) !== interaction.user.id) return interaction.reply({ content: 'فقط الإداري المستلم يستطيع ترك التذكرة.', ephemeral: true });
-        const topic = interaction.channel.topic || '';
-        await interaction.channel.setTopic(topic.replace(/\s*\|\s*ticket-claimed-by:\d+/, ''));
-        await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
-          ViewChannel: true,
-          SendMessages: false,
-          ReadMessageHistory: true
-        });
-        await interaction.message.edit({ components: [ticketControls(false)] });
-        return interaction.reply({ content: 'تم ترك التذكرة، وأصبحت متاحة لإداري آخر.', ephemeral: true });
-      }
-      if (interaction.customId === 'ticket_close') return closeTicket(interaction);
-      if (interaction.customId === 'ticket_delete') return closeTicket(interaction, true);
+      return;
     }
+    if (!interaction.isChatInputCommand()) return;
+    await execute(interaction.commandName, interaction);
   } catch (error) {
     console.error(error);
-    const message = error.code === 50013
-      ? 'لا أملك صلاحيات كافية في هذه القناة. امنحني View Channel وSend Messages وEmbed Links وUse Application Commands.'
-      : 'حدث خطأ غير متوقع. راجع سجل البوت.';
-    if (interaction.deferred) await interaction.editReply({ content: message }).catch(() => {});
-    else if (!interaction.replied) await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+    const text = 'حدث خطأ أثناء تنفيذ الأمر.';
+    if (interaction.replied || interaction.deferred) await interaction.followUp(text).catch(() => {});
+    else await interaction.reply(text).catch(() => {});
   }
 });
-
-client.on(Events.MessageCreate, async message => {
-  try {
-    if (message.author.bot || !message.guild) return;
-    const command = message.content.trim().replace(/[إأآ]/g, 'ا');
-    if (command === '!كيزام') {
-      await message.channel.send('<@1256322885669228556>');
-      return;
-    }
-    if (command.toLowerCase() === 'mp') {
-      if (!isTicketStaff(message.member)) return message.reply('هذا الأمر للرتب المحددة فقط.');
-      const record = loadAdminPoints()[message.author.id] || { points: 0, tickets: 0 };
-      const embed = new EmbedBuilder()
-        .setColor(config.brandColor)
-        .setAuthor({ name: `${message.member?.displayName || message.author.username} • نقاط الإدارة`, iconURL: message.author.displayAvatarURL({ size: 128 }) })
-        .setTitle('🏅 رصيد النقاط الإدارية')
-        .setDescription(`هذه إحصائياتك يا ${message.author}.`)
-        .addFields(
-          { name: '⭐ النقاط', value: `**${record.points}** نقطة`, inline: true },
-          { name: '🎫 التذاكر المنجزة', value: `**${record.tickets}** تذكرة`, inline: true },
-          { name: '📌 طريقة الاحتساب', value: '10 نقاط عند إغلاق أو حذف تذكرة استلمتها.', inline: false }
-        )
-        .setFooter({ text: config.brandName })
-        .setTimestamp();
-      await message.channel.send({ embeds: [embed] });
-      return;
-    }
-    if (command === 'تفضل') {
-      if (!ticketOf(message.channel) || !isTicketStaff(message.member)) return;
-      await message.delete().catch(error => console.error('Greeting message delete error:', error));
-      const staffId = claimedStaffOf(message.channel) || message.author.id;
-      const firstEmoji = serverEmoji(message.guild, '2434darkbluecrown');
-      const secondEmoji = serverEmoji(message.guild, '16577crownbrown');
-      const thirdEmoji = serverEmoji(message.guild, 'Dancing');
-      await message.channel.send(
-        `${firstEmoji} تفضل معاك الإداري <@${staffId}> ${secondEmoji}\nكيف أقدر أساعدك اليوم؟ ${thirdEmoji}`
-      );
-      return;
-    }
-    if (command === 'نموذج') {
-      if (!ticketOf(message.channel)) return message.reply('هذا الأمر يعمل داخل قناة تذكرة فقط.');
-      if (!isTicketStaff(message.member)) return message.reply('هذا الأمر للرتب المحددة فقط.');
-      return showSurvey(message);
-    }
-    if (!['اغلاق التكت', 'اغلاق التذكرة', 'اغلاق'].includes(command)) return;
-    if (!ticketOf(message.channel)) return message.reply('هذا الأمر يعمل داخل قناة تذكرة فقط.');
-    const claimedStaffId = claimedStaffOf(message.channel);
-    if (claimedStaffId && claimedStaffId !== message.author.id) return message.reply('فقط الإداري الذي استلم التذكرة يستطيع إغلاقها.');
-    if (markPointsAwarded(message.channel)) awardAdminPoints(message.author.id);
-    await message.reply('جاري إغلاق التذكرة...');
-    await message.channel.permissionOverwrites.edit(ticketOf(message.channel), { SendMessages: false }).catch(() => {});
-    await message.channel.setName(`closed-${message.channel.name.replace(/^closed-/, '')}`).catch(() => {});
-    await message.channel.send('🔒 تم إغلاق التذكرة بواسطة الإدارة.').catch(() => {});
-  } catch (error) {
-    console.error('Text command error:', error);
-  }
-});
-
-client.on(Events.Error, error => console.error('Discord client error:', error));
-client.on(Events.Warn, warning => console.warn('Discord warning:', warning));
-process.on('unhandledRejection', error => console.error('Unhandled promise rejection:', error));
-
-client.login(config.token);
++process.on('unhandledRejection', console.error);
++client.login(token);

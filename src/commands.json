@@ -1,0 +1,218 @@
+[
+  {
+    "name": "clear",
+    "description": "مسح عدد من الرسائل"
+  },
+  {
+    "name": "ban",
+    "description": "حظر عضو من السيرفر"
+  },
+  {
+    "name": "kick",
+    "description": "طرد عضو من السيرفر"
+  },
+  {
+    "name": "timeout",
+    "description": "كتم عضو لمدة بالدقائق"
+  },
+  {
+    "name": "untimeout",
+    "description": "إزالة الكتم عن عضو"
+  },
+  {
+    "name": "mute",
+    "description": "اختصار أمر الكتم"
+  },
+  {
+    "name": "lock",
+    "description": "قفل القناة الحالية"
+  },
+  {
+    "name": "unlock",
+    "description": "فتح القناة الحالية"
+  },
+  {
+    "name": "hide",
+    "description": "إخفاء القناة عن الأعضاء"
+  },
+  {
+    "name": "add-user",
+    "description": "إضافة عضو إلى القناة"
+  },
+  {
+    "name": "remove-user",
+    "description": "إزالة عضو من القناة"
+  },
+  {
+    "name": "delete",
+    "description": "حذف رسالة الأمر"
+  },
+  {
+    "name": "avatar",
+    "description": "عرض صورة عضو"
+  },
+  {
+    "name": "banner",
+    "description": "عرض بانر عضو"
+  },
+  {
+    "name": "serverinfo",
+    "description": "عرض معلومات السيرفر"
+  },
+  {
+    "name": "server",
+    "description": "اختصار معلومات السيرفر"
+  },
+  {
+    "name": "userinfo",
+    "description": "عرض معلومات عضو"
+  },
+  {
+    "name": "say",
+    "description": "إرسال رسالة باسم البوت"
+  },
+  {
+    "name": "send",
+    "description": "إرسال رسالة في القناة"
+  },
+  {
+    "name": "send-broadcast-panel",
+    "description": "إرسال لوحة بث تفاعلية"
+  },
+  {
+    "name": "embed",
+    "description": "إرسال رسالة Embed"
+  },
+  {
+    "name": "come",
+    "description": "استدعاء عضو في الخاص"
+  },
+  {
+    "name": "nickname",
+    "description": "تغيير لقب عضو"
+  },
+  {
+    "name": "rename",
+    "description": "تغيير اسم القناة"
+  },
+  {
+    "name": "role",
+    "description": "إضافة أو إزالة رتبة من عضو"
+  },
+  {
+    "name": "roles",
+    "description": "عرض رتب السيرفر"
+  },
+  {
+    "name": "ping",
+    "description": "فحص سرعة استجابة البوت"
+  },
+  {
+    "name": "logs-info",
+    "description": "عرض حالة سجل الإدارة"
+  },
+  {
+    "name": "protection-status",
+    "description": "عرض حالة الحماية"
+  },
+  {
+    "name": "line-mode",
+    "description": "تفعيل أو تعطيل خط الرسائل"
+  },
+  {
+    "name": "set-autoline-line",
+    "description": "تحديد رسالة الخط التلقائي"
+  },
+  {
+    "name": "set-feedback-line",
+    "description": "تحديد رسالة خط الاقتراحات"
+  },
+  {
+    "name": "set-feedback-room",
+    "description": "تحديد قناة الاقتراحات"
+  },
+  {
+    "name": "set-message",
+    "description": "تحديد رسالة تلقائية للقناة"
+  },
+  {
+    "name": "set-project-logs",
+    "description": "تحديد قناة سجلات المشروع"
+  },
+  {
+    "name": "set-shortcut",
+    "description": "حفظ اختصار لأمر"
+  },
+  {
+    "name": "set-suggestions-line",
+    "description": "تحديد خط الاقتراحات"
+  },
+  {
+    "name": "set-suggestions-room",
+    "description": "تحديد قناة الاقتراحات"
+  },
+  {
+    "name": "set-tax-line",
+    "description": "تحديد خط الضرائب"
+  },
+  {
+    "name": "set-tax-room",
+    "description": "تحديد قناة الضرائب"
+  },
+  {
+    "name": "setup-logs",
+    "description": "إعداد نظام السجلات"
+  },
+  {
+    "name": "setup-rating",
+    "description": "إعداد نظام التقييم"
+  },
+  {
+    "name": "setup-welcome",
+    "description": "إعداد الترحيب"
+  },
+  {
+    "name": "suggestion-mode",
+    "description": "تفعيل وضع الاقتراحات"
+  },
+  {
+    "name": "tax",
+    "description": "حساب المبلغ بعد ضريبة 5%"
+  },
+  {
+    "name": "remove-all-tokens",
+    "description": "حذف كل التوكنات المحفوظة"
+  },
+  {
+    "name": "remove-autoline-channel",
+    "description": "إزالة قناة الخط التلقائي"
+  },
+  {
+    "name": "remove-nadeko-room",
+    "description": "إزالة غرفة Nadeko"
+  },
+  {
+    "name": "remove-token",
+    "description": "حذف توكن محفوظ"
+  },
+  {
+    "name": "autoreply-add",
+    "description": "إضافة رد تلقائي"
+  },
+  {
+    "name": "autoreply-list",
+    "description": "عرض الردود التلقائية"
+  },
+  {
+    "name": "autoreply-remove",
+    "description": "حذف رد تلقائي"
+  },
+  {
+    "name": "gstart",
+    "description": "بدء سحب تفاعلي"
+  },
+  {
+    "name": "help",
+    "description": "عرض قائمة الأوامر"
+  }
+]
